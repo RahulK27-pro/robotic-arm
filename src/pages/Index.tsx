@@ -9,7 +9,7 @@ const Index = () => {
   return (
     <div className="min-h-screen bg-background flex flex-col">
       <Header />
-      
+
       <main className="flex-1 p-6">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-full">
           {/* Left Panel: Vision & Telemetry */}
@@ -17,7 +17,7 @@ const Index = () => {
             <CameraView />
             <Telemetry />
           </div>
-          
+
           {/* Right Panel: Control Logic */}
           <div className="space-y-6 flex flex-col">
             <div className="flex-1">
@@ -27,7 +27,7 @@ const Index = () => {
           </div>
         </div>
       </main>
-      
+
       {/* Footer: System Logs */}
       <footer className="p-6 pt-0">
         <SystemLogs />
