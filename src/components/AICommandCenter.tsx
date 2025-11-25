@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,35 +17,118 @@ const AICommandCenter = () => {
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
-      content: "AI Command Center initialized. Ready to receive instructions.",
+      content: "AI Command Center initialized. Type colors to search (e.g., 'Find Red and Green').",
       timestamp: new Date().toLocaleTimeString(),
     },
   ]);
 
-  const handleSendCommand = () => {
-    if (!command.trim()) return;
-    
-    setLoading(true);
-    const userMessage: Message = {
-      role: "user",
-      content: command,
-      timestamp: new Date().toLocaleTimeString(),
-    };
-    
-    setMessages(prev => [...prev, userMessage]);
-    setCommand("");
-    
-    // Simulate AI response
-    setTimeout(() => {
-      const aiMessage: Message = {
-        role: "assistant",
-        content: "Analyzing command... Computing inverse kinematics... Executing motion plan.",
-        timestamp: new Date().toLocaleTimeString(),
-      };
-      setMessages(prev => [...prev, aiMessage]);
-      setLoading(false);
-    }, 1500);
+  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  const addMessage = (role: "user" | "assistant", content: string) => {
+    setMessages(prev => [...prev, {
+      role,
+      content,
+      timestamp: new Date().toLocaleTimeString()
+    }]);
   };
+
+  const stopPolling = () => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    setLoading(false);
+  };
+
+  const startPolling = (targetColors: string[]) => {
+    let attempts = 0;
+    const maxAttempts = 20;
+
+    pollIntervalRef.current = setInterval(async () => {
+      attempts++;
+      try {
+        const response = await fetch("http://localhost:5000/get_detection_result");
+        const data = await response.json();
+
+        if (data.status === "found" && data.data && data.data.length > 0) {
+          // Group detections by color
+          const groupedByColor: { [key: string]: any[] } = {};
+
+          data.data.forEach((detection: any) => {
+            if (targetColors.includes(detection.color)) {
+              if (!groupedByColor[detection.color]) {
+                groupedByColor[detection.color] = [];
+              }
+              groupedByColor[detection.color].push(detection);
+            }
+          });
+
+          const foundColors = Object.keys(groupedByColor);
+
+          if (foundColors.length > 0) {
+            // Build message
+            const colorMessages = foundColors.map(color => {
+              const instances = groupedByColor[color];
+              const coords = instances.map(d => `(${d.x}, ${d.y})`).join(", ");
+              return `${color}: ${instances.length} object${instances.length > 1 ? 's' : ''} at ${coords}`;
+            });
+
+            const message = `Target${foundColors.length > 1 ? 's' : ''} Acquired:\n${colorMessages.join('\n')}`;
+            addMessage("assistant", message);
+            stopPolling();
+          }
+        } else if (attempts >= maxAttempts) {
+          addMessage("assistant", `Timeout: Could not find ${targetColors.join(' and ')} within 10 seconds.`);
+          stopPolling();
+        }
+      } catch (error) {
+        console.error("Polling error:", error);
+      }
+    }, 500);
+  };
+
+  const handleSendCommand = async () => {
+    if (!command.trim()) return;
+
+    const userText = command.trim();
+    addMessage("user", userText);
+    setCommand("");
+    setLoading(true);
+
+    // Parse multiple colors from input
+    const availableColors = ["Red", "Blue", "Green", "Yellow"];
+    const targetColors = availableColors.filter(c =>
+      userText.toLowerCase().includes(c.toLowerCase())
+    );
+
+    if (targetColors.length === 0) {
+      setTimeout(() => {
+        addMessage("assistant", "I didn't understand the color(s). Please specify Red, Blue, Green, or Yellow.");
+        setLoading(false);
+      }, 500);
+      return;
+    }
+
+    try {
+      await fetch("http://localhost:5000/set_target_color", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ colors: targetColors }),
+      });
+
+      const colorList = targetColors.join(" and ");
+      addMessage("assistant", `Scanning for ${colorList}...`);
+      startPolling(targetColors);
+
+    } catch (error) {
+      addMessage("assistant", "Error: Could not connect to backend.");
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    return () => stopPolling();
+  }, []);
 
   return (
     <Card className="bg-card border-border h-full flex flex-col">
@@ -61,9 +144,8 @@ const AICommandCenter = () => {
             {messages.map((msg, idx) => (
               <div
                 key={idx}
-                className={`flex gap-3 ${
-                  msg.role === "user" ? "justify-end" : "justify-start"
-                }`}
+                className={`flex gap-3 ${msg.role === "user" ? "justify-end" : "justify-start"
+                  }`}
               >
                 {msg.role === "assistant" && (
                   <div className="flex-shrink-0 w-8 h-8 rounded bg-primary/10 flex items-center justify-center">
@@ -71,13 +153,12 @@ const AICommandCenter = () => {
                   </div>
                 )}
                 <div
-                  className={`max-w-[80%] rounded p-3 ${
-                    msg.role === "user"
+                  className={`max-w-[80%] rounded p-3 ${msg.role === "user"
                       ? "bg-primary text-primary-foreground"
                       : "bg-muted"
-                  }`}
+                    }`}
                 >
-                  <div className="text-sm">{msg.content}</div>
+                  <div className="text-sm whitespace-pre-line">{msg.content}</div>
                   <div className="text-xs opacity-60 mt-1">{msg.timestamp}</div>
                 </div>
                 {msg.role === "user" && (
@@ -99,17 +180,17 @@ const AICommandCenter = () => {
             )}
           </div>
         </ScrollArea>
-        
+
         <div className="flex gap-2">
           <Input
-            placeholder="Stack the red cube on the blue one..."
+            placeholder="Type 'Find Red and Green'..."
             value={command}
             onChange={(e) => setCommand(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleSendCommand()}
             className="bg-muted border-border font-mono text-sm"
             disabled={loading}
           />
-          <Button 
+          <Button
             onClick={handleSendCommand}
             disabled={loading || !command.trim()}
             className="bg-primary hover:bg-primary/90"

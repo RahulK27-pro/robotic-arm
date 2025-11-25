@@ -23,20 +23,22 @@ def video_feed():
 @app.route('/set_target_color', methods=['POST'])
 def set_target_color():
     data = request.json
-    color = data.get('color')
+    colors = data.get('colors')  # Now expects an array
     
-    if color == "None":
-        color = None
+    # Allow empty array or None to reset
+    if not colors:
+        colors = None
         
-    global_camera.set_target_color(color)
-    return jsonify({"status": "success", "target": color})
+    global_camera.set_target_colors(colors)
+    return jsonify({"status": "success", "targets": colors})
 
 @app.route('/get_detection_result', methods=['GET'])
 def get_detection_result():
-    if global_camera.last_detection:
+    if global_camera.last_detection and len(global_camera.last_detection) > 0:
         return jsonify({
             "status": "found",
-            "data": global_camera.last_detection
+            "data": global_camera.last_detection,
+            "count": len(global_camera.last_detection)
         })
     else:
         return jsonify({"status": "searching"})
