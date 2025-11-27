@@ -47,6 +47,22 @@ def get_detection_result():
     else:
         return jsonify({"status": "searching"})
 
+@app.route('/status', methods=['GET'])
+def status():
+    """
+    Returns the status of the system components.
+    """
+    vision_status = "active" if global_camera.video.isOpened() else "inactive"
+    
+    # Servo is simulated for now
+    servo_status = "on"
+    
+    return jsonify({
+        "backend": "connected",
+        "vision": vision_status,
+        "servo": servo_status
+    })
+
 @app.route('/command', methods=['POST'])
 def command():
     data = request.json
