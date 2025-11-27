@@ -32,59 +32,14 @@ const AICommandCenter = () => {
     }]);
   };
 
+  // Polling removed as we now get immediate response from /command
+  // Keeping the ref cleanup for safety
   const stopPolling = () => {
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current);
       pollIntervalRef.current = null;
     }
     setLoading(false);
-  };
-
-  const startPolling = (targetColors: string[]) => {
-    let attempts = 0;
-    const maxAttempts = 20;
-
-    pollIntervalRef.current = setInterval(async () => {
-      attempts++;
-      try {
-        const response = await fetch("http://localhost:5000/get_detection_result");
-        const data = await response.json();
-
-        if (data.status === "found" && data.data && data.data.length > 0) {
-          // Group detections by color
-          const groupedByColor: { [key: string]: any[] } = {};
-
-          data.data.forEach((detection: any) => {
-            if (targetColors.includes(detection.color)) {
-              if (!groupedByColor[detection.color]) {
-                groupedByColor[detection.color] = [];
-              }
-              groupedByColor[detection.color].push(detection);
-            }
-          });
-
-          const foundColors = Object.keys(groupedByColor);
-
-          if (foundColors.length > 0) {
-            // Build message
-            const colorMessages = foundColors.map(color => {
-              const instances = groupedByColor[color];
-              const coords = instances.map(d => `(${d.x}, ${d.y})`).join(", ");
-              return `${color}: ${instances.length} object${instances.length > 1 ? 's' : ''} at ${coords}`;
-            });
-
-            const message = `Target${foundColors.length > 1 ? 's' : ''} Acquired:\n${colorMessages.join('\n')}`;
-            addMessage("assistant", message);
-            stopPolling();
-          }
-        } else if (attempts >= maxAttempts) {
-          addMessage("assistant", `Timeout: Could not find ${targetColors.join(' and ')} within 10 seconds.`);
-          stopPolling();
-        }
-      } catch (error) {
-        console.error("Polling error:", error);
-      }
-    }, 500);
   };
 
   const handleSendCommand = async () => {
@@ -95,33 +50,56 @@ const AICommandCenter = () => {
     setCommand("");
     setLoading(true);
 
-    // Parse multiple colors from input
-    const availableColors = ["Red", "Blue", "Green", "Yellow"];
-    const targetColors = availableColors.filter(c =>
-      userText.toLowerCase().includes(c.toLowerCase())
-    );
-
-    if (targetColors.length === 0) {
-      setTimeout(() => {
-        addMessage("assistant", "I didn't understand the color(s). Please specify Red, Blue, Green, or Yellow.");
-        setLoading(false);
-      }, 500);
-      return;
-    }
-
     try {
-      await fetch("http://localhost:5000/set_target_color", {
+      // First, get the current vision state
+      const visionResponse = await fetch("http://localhost:5000/get_detection_result");
+      const visionData = await visionResponse.json();
+
+      // Format vision state
+      let visionState: { [key: string]: [number, number] } = {};
+      if (visionData.status === "found" && visionData.data) {
+        visionData.data.forEach((obj: any) => {
+          const key = `${obj.color.toLowerCase()}_cube`;
+          visionState[key] = [obj.x, obj.y];
+        });
+      }
+
+      // Send command to AI
+      const response = await fetch("http://localhost:5000/command", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ colors: targetColors }),
+        body: JSON.stringify({ command: userText }),
       });
 
-      const colorList = targetColors.join(" and ");
-      addMessage("assistant", `Scanning for ${colorList}...`);
-      startPolling(targetColors);
+      const data = await response.json();
+
+      // Build detailed response message
+      let detailedMessage = "";
+
+      // Add Vision State
+      detailedMessage += `Vision State: ${JSON.stringify(visionState)}\n\n`;
+
+      // Add Response
+      detailedMessage += "--- Response ---\n";
+      detailedMessage += JSON.stringify({ plan: data.plan || [], reply: data.reply || "" }, null, 2);
+
+      // Add status
+      if (data.plan && data.plan.length > 0) {
+        detailedMessage += "\n\n[SUCCESS] Plan generated successfully.";
+      }
+
+      if (data.reply || data.plan) {
+        addMessage("assistant", detailedMessage);
+      } else if (data.error) {
+        addMessage("assistant", `Error: ${data.error}`);
+      } else {
+        addMessage("assistant", "Received an empty response from the Brain.");
+      }
 
     } catch (error) {
       addMessage("assistant", "Error: Could not connect to backend.");
+      console.error(error);
+    } finally {
       setLoading(false);
     }
   };
@@ -154,8 +132,8 @@ const AICommandCenter = () => {
                 )}
                 <div
                   className={`max-w-[80%] rounded p-3 ${msg.role === "user"
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-muted"
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted"
                     }`}
                 >
                   <div className="text-sm whitespace-pre-line">{msg.content}</div>

@@ -2,3 +2,5 @@ flask
 flask-cors
 opencv-python
 numpy
+groq
+python-dotenv

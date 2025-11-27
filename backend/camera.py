@@ -4,7 +4,8 @@ import numpy as np
 class VideoCamera(object):
     def __init__(self):
         self.video = cv2.VideoCapture(0)
-        self.target_colors = [] # Now a list of colors
+        # Default to detecting all colors so the Brain has full context
+        self.target_colors = ["Red", "Blue", "Green", "Yellow"] 
         self.last_detection = [] # Stores list of all detections
         
         self.color_ranges = {
