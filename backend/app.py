@@ -126,13 +126,21 @@ def command():
             # Create a unique key if multiple of same color? 
             # The prompt example uses "red_cube". Our camera detects "Red".
             # Let's map "Red" to "red_cube" etc.
+            # Let's map "Red" to "red_cube" etc.
             color = obj['color'].lower()
             key = f"{color}_cube" 
             # If multiple, maybe append index? For now, let's just overwrite or use a list?
             # The prompt example: {'red_cube': [320, 240]} implies single instance or specific naming.
             # Let's just use the color name as key for simplicity, or append index if needed.
             # But to match the example strictly:
-            vision_state[key] = [obj['x'], obj['y']]
+            # We now also have 'cm_x' and 'cm_y' in obj if available
+            if 'cm_x' in obj:
+                vision_state[key] = {
+                    "pixel_coords": [obj['x'], obj['y']],
+                    "cm_coords": [obj['cm_x'], obj['cm_y']]
+                }
+            else:
+                vision_state[key] = [obj['x'], obj['y']]
 
     response = process_command(user_text, vision_state)
     return jsonify(response)

@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from coordinate_mapper import CoordinateMapper
 
 class VideoCamera(object):
     def __init__(self):
@@ -7,6 +8,7 @@ class VideoCamera(object):
         # Default to detecting all colors so the Brain has full context
         self.target_colors = ["Red", "Blue", "Green", "Yellow"] 
         self.last_detection = [] # Stores list of all detections
+        self.mapper = None # Initialize mapper lazily when we have frame dimensions
         
         self.color_ranges = {
             "Red": [
@@ -49,6 +51,10 @@ class VideoCamera(object):
         height, width, _ = frame.shape
         center_x, center_y = width // 2, height // 2
         
+        # Initialize mapper if not already done
+        if self.mapper is None:
+            self.mapper = CoordinateMapper(width, height)
+
         # Reset detection list
         self.last_detection = []
         
@@ -78,11 +84,20 @@ class VideoCamera(object):
                         dx = cx - center_x
                         dy = center_y - cy 
                         
+                        # Calculate Real-World Coordinates (cm)
+                        # Note: We map the absolute pixel coordinates (cx, cy)
+                        # But typically for a robot arm, we might want coordinates relative to the center or base.
+                        # The user asked for "pixel_to_cm(pixel_x, pixel_y)" which maps 0-width to 0-29.7cm.
+                        # So we pass the absolute (cx, cy).
+                        cm_x, cm_y = self.mapper.pixel_to_cm(cx, cy)
+
                         # Add to detection list
                         self.last_detection.append({
                             "color": color_name,
-                            "x": dx,
-                            "y": dy
+                            "x": dx,      # Relative pixel x (for UI/Center offset)
+                            "y": dy,      # Relative pixel y
+                            "cm_x": cm_x, # Real-world x in cm
+                            "cm_y": cm_y  # Real-world y in cm
                         })
                         
                         # Visual feedback - use different colors for different target colors
