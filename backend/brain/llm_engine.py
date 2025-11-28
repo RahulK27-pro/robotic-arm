@@ -2,12 +2,10 @@ import os
 import json
 from groq import Groq
 from dotenv import load_dotenv
-from prompts import SYSTEM_PROMPT
 
 load_dotenv()
 
 # Initialize Groq Client
-# Ensure GROQ_API_KEY is set in your environment variables
 try:
     client = Groq(
         api_key=os.environ.get("GROQ_API_KEY"),
@@ -16,7 +14,40 @@ except Exception as e:
     print(f"Error initializing Groq client: {e}")
     client = None
 
-def process_command(user_text, current_vision_state):
+SYSTEM_PROMPT = """
+You are the brain of a 6-DOF robotic arm.
+Your task is to convert natural language commands into a structured JSON plan.
+You will receive:
+1. A user command (e.g., "Pick the red block and put it on the blue block").
+2. A list of visible objects with their coordinates (e.g., {"red_block": [10, 20, 0], "blue_block": [30, 40, 0]}).
+
+You must return a JSON object with the following structure:
+{
+    "plan": [
+        {
+            "action": "move",
+            "target": [x, y, z],
+            "description": "Moving to red block"
+        },
+        {
+            "action": "grip",
+            "state": "close",
+            "description": "Gripping object"
+        },
+        ...
+    ],
+    "reply": "I am picking up the red block."
+}
+
+Rules:
+- Return ONLY JSON.
+- If the object is not found in the vision state, return a polite error in the "reply" field and an empty "plan".
+- Assume z=0 is the table surface. A safe travel height is z=10.
+- "Pick" involves: Move to above object -> Move down -> Grip -> Move up.
+- "Place" involves: Move to above target -> Move down -> Ungrip -> Move up.
+"""
+
+def process_command(user_text, vision_state):
     """
     Sends the user command and current vision state to the Groq API.
     Returns the parsed JSON plan and reply.
@@ -30,7 +61,7 @@ def process_command(user_text, current_vision_state):
     # Construct the user message
     user_message = f"""
     Command: "{user_text}"
-    Vision State: {json.dumps(current_vision_state)}
+    Vision State: {json.dumps(vision_state)}
     """
 
     try:
@@ -45,9 +76,9 @@ def process_command(user_text, current_vision_state):
                     "content": user_message,
                 }
             ],
-            model="llama-3.3-70b-versatile", # Updated to Llama 3.3 70B as requested
-            temperature=0.1, # Low temperature for more deterministic/structured output
-            response_format={"type": "json_object"}, # Enforce JSON mode
+            model="llama-3.3-70b-versatile",
+            temperature=0.1,
+            response_format={"type": "json_object"},
         )
 
         response_content = chat_completion.choices[0].message.content
