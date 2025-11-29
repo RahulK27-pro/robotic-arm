@@ -1,11 +1,15 @@
+import { useState } from "react";
 import Header from "@/components/Header";
 import CameraView from "@/components/CameraView";
 import Telemetry from "@/components/Telemetry";
 import AICommandCenter from "@/components/AICommandCenter";
 import ManualControls from "@/components/ManualControls";
 import SystemLogs from "@/components/SystemLogs";
+import ServoPositionPanel from "@/components/ServoPositionPanel";
 
 const Index = () => {
+  const [currentServoAngles, setCurrentServoAngles] = useState<number[]>([0, 0, 0, 0, 0, 0]);
+
   return (
     <div className="min-h-screen bg-background flex flex-col">
       <Header />
@@ -21,8 +25,9 @@ const Index = () => {
           {/* Right Panel: Control Logic */}
           <div className="space-y-6 flex flex-col">
             <div className="flex-1">
-              <AICommandCenter />
+              <AICommandCenter onServoUpdate={setCurrentServoAngles} />
             </div>
+            <ServoPositionPanel angles={currentServoAngles} />
             <ManualControls />
           </div>
         </div>

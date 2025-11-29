@@ -11,7 +11,11 @@ interface Message {
   timestamp: string;
 }
 
-const AICommandCenter = () => {
+interface AICommandCenterProps {
+  onServoUpdate?: (angles: number[]) => void;
+}
+
+const AICommandCenter = ({ onServoUpdate }: AICommandCenterProps) => {
   const [command, setCommand] = useState("");
   const [loading, setLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
@@ -79,16 +83,43 @@ const AICommandCenter = () => {
       // Add Vision State
       detailedMessage += `Vision State: ${JSON.stringify(visionState)}\n\n`;
 
-      // Add Response
-      detailedMessage += "--- Response ---\n";
-      detailedMessage += JSON.stringify({ plan: data.plan || [], reply: data.reply || "" }, null, 2);
-
-      // Add status
-      if (data.plan && data.plan.length > 0) {
-        detailedMessage += "\n\n[SUCCESS] Plan generated successfully.";
+      // Add AI Reply
+      if (data.reply) {
+        detailedMessage += `Reply: ${data.reply}\n\n`;
       }
 
-      if (data.reply || data.plan) {
+      // Add Plan
+      if (data.plan && data.plan.length > 0) {
+        detailedMessage += `--- Plan ---\n${JSON.stringify(data.plan, null, 2)}\n\n`;
+      }
+
+      // Add Execution Log with Servo Angles
+      if (data.execution_log && data.execution_log.length > 0) {
+        detailedMessage += `--- Execution Log ---\n`;
+        data.execution_log.forEach((log: any, idx: number) => {
+          detailedMessage += `Step ${idx + 1}: ${log.status}\n`;
+          if (log.angles) {
+            detailedMessage += `  Servo Angles:\n`;
+            detailedMessage += `    Base:        ${log.angles[0]}°\n`;
+            detailedMessage += `    Shoulder:    ${log.angles[1]}°\n`;
+            detailedMessage += `    Elbow:       ${log.angles[2]}°\n`;
+            detailedMessage += `    Wrist Pitch: ${log.angles[3]}°\n`;
+            detailedMessage += `    Wrist Roll:  ${log.angles[4]}°\n`;
+            detailedMessage += `    Gripper:     ${log.angles[5]}°\n`;
+
+            // Update servo position panel with the latest angles
+            if (onServoUpdate) {
+              onServoUpdate(log.angles);
+            }
+          }
+          if (log.error) {
+            detailedMessage += `  Error: ${log.error}\n`;
+          }
+          detailedMessage += `\n`;
+        });
+      }
+
+      if (data.reply || data.plan || data.execution_log) {
         addMessage("assistant", detailedMessage);
       } else if (data.error) {
         addMessage("assistant", `Error: ${data.error}`);
