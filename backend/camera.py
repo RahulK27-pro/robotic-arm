@@ -1,10 +1,13 @@
+import os
 import cv2
 import numpy as np
 from coordinate_mapper import CoordinateMapper
 
 class VideoCamera(object):
     def __init__(self):
-        self.video = cv2.VideoCapture(0)
+        camera_index = int(os.environ.get("CAMERA_INDEX", 0))
+        # cv2.CAP_DSHOW is recommended for Windows to avoid delays/issues
+        self.video = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
         # Default to detecting all colors so the Brain has full context
         self.target_colors = ["Red", "Blue", "Green", "Yellow"] 
         self.last_detection = [] # Stores list of all detections
