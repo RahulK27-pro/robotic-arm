@@ -13,7 +13,9 @@ app = Flask(__name__)
 CORS(app)
 
 global_camera = VideoCamera()
-robot = RobotArm(simulation_mode=True)
+# Initialize robot in HARDWARE mode to communicate with Arduino on COM4
+# If Arduino is not connected, it will automatically fall back to simulation mode
+robot = RobotArm(simulation_mode=False, port='COM4', baudrate=115200)
 
 def gen(camera):
     while True:
