@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Slider } from "@/components/ui/slider";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,37 @@ interface Position {
   speed: number;
 }
 
+const API_BASE = "http://localhost:5000";
+
+// Throttle hook - limits function calls to once per delay period
+const useThrottle = (callback: (...args: any[]) => void, delay: number) => {
+  const lastCall = useRef(0);
+  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  return useCallback(
+    (...args: any[]) => {
+      const now = Date.now();
+      const timeSinceLastCall = now - lastCall.current;
+
+      if (timeSinceLastCall >= delay) {
+        // Execute immediately if enough time has passed
+        lastCall.current = now;
+        callback(...args);
+      } else {
+        // Schedule for later if called too soon
+        if (timeoutRef.current) {
+          clearTimeout(timeoutRef.current);
+        }
+        timeoutRef.current = setTimeout(() => {
+          lastCall.current = Date.now();
+          callback(...args);
+        }, delay - timeSinceLastCall);
+      }
+    },
+    [callback, delay]
+  );
+};
+
 const ManualControls = () => {
   const [isOpen, setIsOpen] = useState(true);
   const [base, setBase] = useState([90]);
@@ -31,6 +62,106 @@ const ManualControls = () => {
   const [speed, setSpeed] = useState([1000]);
   const [savedPositions, setSavedPositions] = useState<Position[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<"connected" | "disconnected">("disconnected");
+
+  // Send angles to backend
+  const sendAnglesToBackend = async (angles: number[]) => {
+    try {
+      const response = await fetch(`${API_BASE}/manual_control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ angles }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        console.error("Command failed:", data.error);
+      }
+    } catch (error) {
+      console.error("Connection error:", error);
+    }
+  };
+
+  // Throttled version - sends at most once every 50ms (20 updates/sec)
+  const throttledSend = useThrottle(sendAnglesToBackend, 50);
+
+  // Poll servo positions every 500ms (only when NOT dragging)
+  useEffect(() => {
+    const pollPositions = async () => {
+      // Skip polling while user is dragging
+      if (isDragging || isSending) return;
+
+      try {
+        const response = await fetch(`${API_BASE}/get_servo_positions`);
+        if (response.ok) {
+          const data = await response.json();
+          setConnectionStatus("connected");
+
+          // Update sliders with actual servo positions
+          const angles = data.angles;
+          setBase([angles[0]]);
+          setShoulder([angles[1]]);
+          setElbow([angles[2]]);
+          setWristPitch([angles[3]]);
+          setWristRoll([angles[4]]);
+          setGripper([angles[5]]);
+        } else {
+          setConnectionStatus("disconnected");
+        }
+      } catch (error) {
+        setConnectionStatus("disconnected");
+      }
+    };
+
+    // Poll immediately, then every 500ms
+    pollPositions();
+    const interval = setInterval(pollPositions, 500);
+    return () => clearInterval(interval);
+  }, [isDragging, isSending]);
+
+  // Handler for continuous slider  movement (while dragging)
+  const handleSliderChange = (setter: (val: number[]) => void) => (value: number[]) => {
+    setIsDragging(true);
+    setter(value);
+
+    // Send current angles (throttled to 50ms)
+    const currentAngles = [
+      value === base ? value[0] : base[0],
+      value === shoulder ? value[0] : shoulder[0],
+      value === elbow ? value[0] : elbow[0],
+      value === wristPitch ? value[0] : wristPitch[0],
+      value === wristRoll ? value[0] : wristRoll[0],
+      value === gripper ? value[0] : gripper[0],
+    ];
+
+    // Get the correct current angle for the slider being moved
+    if (setter === setBase) currentAngles[0] = value[0];
+    else if (setter === setShoulder) currentAngles[1] = value[0];
+    else if (setter === setElbow) currentAngles[2] = value[0];
+    else if (setter === setWristPitch) currentAngles[3] = value[0];
+    else if (setter === setWristRoll) currentAngles[4] = value[0];
+    else if (setter === setGripper) currentAngles[5] = value[0];
+
+    throttledSend(currentAngles);
+  };
+
+  // Handler for when slider is released
+  const handleSliderCommit = () => {
+    setIsDragging(false);
+
+    // Send final angles one more time (unthrottled)
+    const finalAngles = [
+      base[0],
+      shoulder[0],
+      elbow[0],
+      wristPitch[0],
+      wristRoll[0],
+      gripper[0],
+    ];
+    sendAnglesToBackend(finalAngles);
+  };
 
   const handleSavePosition = () => {
     const newPosition: Position = {
@@ -48,23 +179,50 @@ const ManualControls = () => {
     });
   };
 
-  const handlePlayMovements = () => {
+  const handlePlayMovements = async () => {
     if (savedPositions.length === 0) {
       toast.error("No saved positions", {
         description: "Save at least one position first",
       });
       return;
     }
+
     setIsPlaying(true);
+    setIsSending(true);
     toast.info("Playing movements", {
       description: `${savedPositions.length} positions queued`,
     });
-    // Simulate playback
-    setTimeout(() => setIsPlaying(false), 3000);
+
+    // Execute each saved position sequentially
+    for (let i = 0; i < savedPositions.length; i++) {
+      if (!isPlaying && i > 0) break;
+
+      const pos = savedPositions[i];
+      const angles = [
+        pos.base,
+        pos.shoulder,
+        pos.elbow,
+        pos.wristPitch,
+        pos.wristRoll,
+        pos.gripper,
+      ];
+
+      await sendAnglesToBackend(angles);
+
+      // Wait based on saved speed
+      if (i < savedPositions.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, pos.speed));
+      }
+    }
+
+    setIsPlaying(false);
+    setIsSending(false);
+    toast.success("Playback complete");
   };
 
   const handleStopMovement = () => {
     setIsPlaying(false);
+    setIsSending(false);
     toast.warning("Movement stopped", {
       description: "Servo motion halted",
     });
@@ -78,15 +236,22 @@ const ManualControls = () => {
             <CardTitle className="text-sm data-label flex items-center gap-2">
               <Settings className="h-4 w-4 text-warning" />
               ENGINEER MODE - MANUAL OVERRIDE
+              <span
+                className={`ml-2 text-xs ${connectionStatus === "connected"
+                    ? "text-status-active"
+                    : "text-critical"
+                  }`}
+              >
+                {connectionStatus === "connected" ? "🟢 CONNECTED" : "🔴 DISCONNECTED"}
+              </span>
             </CardTitle>
             <ChevronDown
-              className={`h-4 w-4 transition-transform ${
-                isOpen ? "rotate-180" : ""
-              }`}
+              className={`h-4 w-4 transition-transform ${isOpen ? "rotate-180" : ""
+                }`}
             />
           </CollapsibleTrigger>
         </CardHeader>
-        
+
         <CollapsibleContent>
           <CardContent className="space-y-6">
             {/* Servo Controls */}
@@ -97,10 +262,12 @@ const ManualControls = () => {
               </div>
               <Slider
                 value={base}
-                onValueChange={setBase}
+                onValueChange={handleSliderChange(setBase)}
+                onValueCommit={handleSliderCommit}
                 max={180}
                 step={0.01}
                 className="w-full"
+                disabled={isSending}
               />
               <div className="flex justify-between text-xs text-muted-foreground">
                 <span>0°</span>
@@ -115,10 +282,12 @@ const ManualControls = () => {
               </div>
               <Slider
                 value={shoulder}
-                onValueChange={setShoulder}
+                onValueChange={handleSliderChange(setShoulder)}
+                onValueCommit={handleSliderCommit}
                 max={180}
                 step={0.01}
                 className="w-full"
+                disabled={isSending}
               />
               <div className="flex justify-between text-xs text-muted-foreground">
                 <span>0°</span>
@@ -133,10 +302,12 @@ const ManualControls = () => {
               </div>
               <Slider
                 value={elbow}
-                onValueChange={setElbow}
+                onValueChange={handleSliderChange(setElbow)}
+                onValueCommit={handleSliderCommit}
                 max={180}
                 step={0.01}
                 className="w-full"
+                disabled={isSending}
               />
               <div className="flex justify-between text-xs text-muted-foreground">
                 <span>0°</span>
@@ -151,10 +322,12 @@ const ManualControls = () => {
               </div>
               <Slider
                 value={wristPitch}
-                onValueChange={setWristPitch}
+                onValueChange={handleSliderChange(setWristPitch)}
+                onValueCommit={handleSliderCommit}
                 max={180}
                 step={0.01}
                 className="w-full"
+                disabled={isSending}
               />
               <div className="flex justify-between text-xs text-muted-foreground">
                 <span>0°</span>
@@ -169,10 +342,12 @@ const ManualControls = () => {
               </div>
               <Slider
                 value={wristRoll}
-                onValueChange={setWristRoll}
+                onValueChange={handleSliderChange(setWristRoll)}
+                onValueCommit={handleSliderCommit}
                 max={180}
                 step={0.01}
                 className="w-full"
+                disabled={isSending}
               />
               <div className="flex justify-between text-xs text-muted-foreground">
                 <span>0°</span>
@@ -187,10 +362,12 @@ const ManualControls = () => {
               </div>
               <Slider
                 value={gripper}
-                onValueChange={setGripper}
+                onValueChange={handleSliderChange(setGripper)}
+                onValueCommit={handleSliderCommit}
                 max={180}
                 step={0.01}
                 className="w-full"
+                disabled={isSending}
               />
               <div className="flex justify-between text-xs text-muted-foreground">
                 <span>CLOSED</span>
@@ -228,7 +405,7 @@ const ManualControls = () => {
                 <Save className="h-4 w-4 mr-2" />
                 SAVE POSITION ({savedPositions.length})
               </Button>
-              
+
               <div className="grid grid-cols-2 gap-3">
                 <Button
                   onClick={handlePlayMovements}
@@ -239,7 +416,7 @@ const ManualControls = () => {
                   <Play className="h-4 w-4 mr-2" />
                   PLAY
                 </Button>
-                
+
                 <Button
                   onClick={handleStopMovement}
                   disabled={!isPlaying}

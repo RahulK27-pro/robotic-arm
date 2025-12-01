@@ -6,6 +6,24 @@ LINK_2 = 15.0  # Shoulder to Elbow
 LINK_3 = 15.0  # Elbow to Wrist
 LINK_4 = 5.0   # Wrist to Gripper
 
+def normalize_angle(angle):
+    """
+    Normalize any angle to 0-180 range for servo compatibility.
+    Maps negative angles and angles > 180 to valid servo range.
+    """
+    # First normalize to -180 to +180
+    angle = angle % 360
+    if angle > 180:
+        angle -= 360
+    
+    # Map to 0-180 range
+    # Negative angles wrap around: -10 becomes 170, -90 becomes 90, etc.
+    if angle < 0:
+        angle = 180 + angle  # e.g., -30 becomes 150
+    
+    # Clamp to ensure we're in range (safety)
+    return max(0, min(180, angle))
+
 def solve_angles(x, y, z, pitch=0, roll=0):
     """
     Calculates 6-DOF angles for a target (x, y, z) with desired pitch/roll.
@@ -15,7 +33,8 @@ def solve_angles(x, y, z, pitch=0, roll=0):
 
     # 1. Base Angle (Theta 1)
     # Simple atan2 of y and x
-    angles[0] = math.degrees(math.atan2(y, x))
+    # atan2 returns -180 to +180, normalize to 0-180
+    angles[0] = normalize_angle(math.degrees(math.atan2(y, x)))
 
     # 2. Wrist Position Calculation
     # We need to back off from the target (x,y,z) by the gripper length (LINK_4)
@@ -95,14 +114,15 @@ def solve_angles(x, y, z, pitch=0, roll=0):
     # For a simple 3-link chain in 2D:
     # Global Pitch = Theta2 + Theta3 + Theta4
     # So Theta4 = Global Pitch - Theta2 - Theta3
-    angles[3] = pitch - angles[1] - (angles[2] - 180) # Adjusting for the internal angle nature
+    wrist_pitch_raw = pitch - angles[1] - (angles[2] - 180)
+    angles[3] = normalize_angle(wrist_pitch_raw)  # Normalize to 0-180
 
     # 5. Wrist Roll (Theta 5)
-    angles[4] = roll
+    angles[4] = normalize_angle(roll)  # Normalize to 0-180
 
     # 6. Gripper (Theta 6)
     # Default open/close state, passed as 0 for now or handled separately
     angles[5] = 0 
 
-    # Normalize angles to 0-180 range if possible, or keep as is
+    # All angles are now normalized to 0-180 range
     return [round(a, 2) for a in angles]

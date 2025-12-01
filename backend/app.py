@@ -62,6 +62,61 @@ def status():
         "robot_mode": "simulation" if robot.simulation_mode else "hardware"
     })
 
+@app.route('/manual_control', methods=['POST'])
+def manual_control():
+    """
+    Direct manual control endpoint for Engineer Mode.
+    Accepts 6 servo angles and sends them directly to the robot.
+    """
+    try:
+        data = request.json
+        angles = data.get('angles')
+        
+        if not angles:
+            return jsonify({"error": "No angles provided"}), 400
+        
+        if len(angles) != 6:
+            return jsonify({"error": f"Expected 6 angles, got {len(angles)}"}), 400
+        
+        # Validate all angles are in 0-180 range
+        for i, angle in enumerate(angles):
+            if not isinstance(angle, (int, float)):
+                return jsonify({"error": f"Invalid angle at index {i}: must be a number"}), 400
+            if angle < 0 or angle > 180:
+                return jsonify({"error": f"Invalid angle at index {i}: {angle}° (must be 0-180)"}), 400
+        
+        # Send to robot
+        success = robot.move_to(angles)
+        
+        if success:
+            return jsonify({
+                "status": "success",
+                "angles": robot.current_angles,
+                "mode": "simulation" if robot.simulation_mode else "hardware"
+            })
+        else:
+            return jsonify({"error": "Failed to move robot"}), 500
+            
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/get_servo_positions', methods=['GET'])
+def get_servo_positions():
+    """
+    Get current servo positions for real-time feedback.
+    """
+    try:
+        return jsonify({
+            "status": "success",
+            "angles": robot.current_angles,
+            "mode": "simulation" if robot.simulation_mode else "hardware",
+            "connected": robot.serial.is_open if robot.serial else False
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/process_command', methods=['POST'])
 def handle_command():
     """
