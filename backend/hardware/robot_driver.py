@@ -78,8 +78,25 @@ class RobotArm:
             packet = f"<{','.join(map(str, clamped_angles))}>"
             print(f"📤 Simulated Command: {packet}")
             print(f"   [Base: {clamped_angles[0]}°, Shoulder: {clamped_angles[1]}°, Elbow: {clamped_angles[2]}°, WristV: {clamped_angles[3]}°, WristR: {clamped_angles[4]}°, Grip: {clamped_angles[5]}°]")
-            time.sleep(0.5)  # Simulate movement time
-            self.current_angles = clamped_angles
+            
+            # Interpolate movement for smoothness (1.0 second duration)
+            duration = 1.0
+            steps = 20
+            dt = duration / steps
+            start_angles = list(self.current_angles)
+            
+            for step in range(1, steps + 1):
+                t = step / steps
+                # Linear interpolation
+                interp_angles = []
+                for i in range(6):
+                    val = start_angles[i] + (clamped_angles[i] - start_angles[i]) * t
+                    interp_angles.append(val)
+                
+                self.current_angles = interp_angles
+                time.sleep(dt)
+            
+            self.current_angles = clamped_angles # Ensure final exact value
             return True
         
         else:
@@ -163,7 +180,7 @@ class RobotArm:
                 return False
                 
             # Small delay between servos for visual clarity / stability
-            time.sleep(0.2)
+            time.sleep(0.1)
             
         return True
 

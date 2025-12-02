@@ -31,8 +31,8 @@ You must return a JSON object with the following structure:
         },
         {
             "action": "grip",
-            "state": "close",
-            "description": "Gripping object"
+            "angle": 45,
+            "description": "Opening gripper"
         },
         ...
     ],
@@ -41,10 +41,20 @@ You must return a JSON object with the following structure:
 
 Rules:
 - Return ONLY JSON.
-- If the object is not found in the vision state, return a polite error in the "reply" field and an empty "plan".
+- If the user provides explicit coordinates (e.g., "at 10, 20, 5"), use those coordinates directly.
+- If no coordinates are provided, look for the object in the vision state.
+- If the object is not found and no coordinates are provided, return a polite error in the "reply" field and an empty "plan".
 - Assume z=0 is the table surface. A safe travel height is z=10.
-- "Pick" involves: Move to above object -> Move down -> Grip -> Move up.
-- "Place" involves: Move to above target -> Move down -> Ungrip -> Move up.
+- "Pick" involves: 
+    1. Move to object coordinates (x, y, z).
+    2. Grip with angle 45 (Open).
+    3. Grip with angle 30 (Close to grab).
+    4. Move to (x, y, z + 10) (Lift).
+- "Place" involves: 
+    1. Move to target coordinates (x, y, z + 10) (Approach from above).
+    2. Move to target coordinates (x, y, z) (Lower).
+    3. Grip with angle 90 (Open/Release).
+    4. Move to target coordinates (x, y, z + 10) (Lift away).
 """
 
 def process_command(user_text, vision_state):

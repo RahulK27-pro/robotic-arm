@@ -6,6 +6,8 @@ from brain.llm_engine import process_command
 from brain.kinematics import solve_angles
 from hardware.robot_driver import RobotArm
 import traceback
+import time
+import json
 
 load_dotenv()
 
@@ -117,6 +119,28 @@ def get_servo_positions():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+def generate_servo_stream():
+    """Generator function for SSE servo updates."""
+    while True:
+        try:
+            # Create data packet
+            data = {
+                "angles": robot.current_angles,
+                "mode": "simulation" if robot.simulation_mode else "hardware",
+                "connected": robot.serial.is_open if robot.serial else False
+            }
+            # Format as SSE message
+            yield f"data: {json.dumps(data)}\n\n"
+            time.sleep(0.1) # 100ms update rate
+        except Exception as e:
+            print(f"Stream error: {e}")
+            break
+
+@app.route('/servo_stream')
+def servo_stream():
+    """Endpoint for Server-Sent Events of servo positions."""
+    return Response(generate_servo_stream(), mimetype='text/event-stream')
+
 @app.route('/process_command', methods=['POST'])
 def handle_command():
     """
@@ -162,6 +186,10 @@ def handle_command():
                         # Default pitch -90 (downwards), roll 0
                         angles = solve_angles(target[0], target[1], target[2], pitch=-90, roll=0)
                         
+                        # Preserve current gripper state
+                        # solve_angles returns 0 for gripper by default, so we overwrite it
+                        angles[5] = robot.current_angles[5]
+
                         # Move Robot
                         robot.move_to_sequenced(angles)
                         
@@ -177,11 +205,20 @@ def handle_command():
                             "status": "failed"
                         })
             elif step.get("action") == "grip":
-                # Handle gripper logic if needed
-                simulated_execution.append({
-                    "step": step,
-                    "status": "executed"
-                })
+                angle = step.get("angle")
+                if angle is not None:
+                    # Create new configuration with updated gripper
+                    new_angles = list(robot.current_angles)
+                    new_angles[5] = angle
+                    
+                    # Move Robot
+                    robot.move_to_sequenced(new_angles)
+                    
+                    simulated_execution.append({
+                        "step": step,
+                        "angles": new_angles,
+                        "status": "executed"
+                    })
 
         return jsonify({
             "status": "success",

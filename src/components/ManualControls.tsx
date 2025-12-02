@@ -87,19 +87,21 @@ const ManualControls = () => {
   // Throttled version - sends at most once every 50ms (20 updates/sec)
   const throttledSend = useThrottle(sendAnglesToBackend, 50);
 
-  // Poll servo positions every 500ms (only when NOT dragging)
+  // SSE Connection for real-time updates
   useEffect(() => {
-    const pollPositions = async () => {
-      // Skip polling while user is dragging
-      if (isDragging || isSending) return;
+    // Skip if user is dragging to avoid jitter
+    if (isDragging || isSending) return;
 
+    const eventSource = new EventSource(`${API_BASE}/servo_stream`);
+
+    eventSource.onmessage = (event) => {
       try {
-        const response = await fetch(`${API_BASE}/get_servo_positions`);
-        if (response.ok) {
-          const data = await response.json();
-          setConnectionStatus("connected");
+        const data = JSON.parse(event.data);
+        setConnectionStatus("connected");
 
-          // Update sliders with actual servo positions
+        // Update sliders with actual servo positions
+        // Only update if not dragging to prevent fighting the user
+        if (!isDragging && !isSending) {
           const angles = data.angles;
           setBase([angles[0]]);
           setShoulder([angles[1]]);
@@ -107,18 +109,21 @@ const ManualControls = () => {
           setWristPitch([angles[3]]);
           setWristRoll([angles[4]]);
           setGripper([angles[5]]);
-        } else {
-          setConnectionStatus("disconnected");
         }
       } catch (error) {
-        setConnectionStatus("disconnected");
+        console.error("Error parsing SSE data:", error);
       }
     };
 
-    // Poll immediately, then every 500ms
-    pollPositions();
-    const interval = setInterval(pollPositions, 500);
-    return () => clearInterval(interval);
+    eventSource.onerror = (error) => {
+      console.error("SSE Error:", error);
+      setConnectionStatus("disconnected");
+      eventSource.close();
+    };
+
+    return () => {
+      eventSource.close();
+    };
   }, [isDragging, isSending]);
 
   // Handler for continuous slider  movement (while dragging)
@@ -238,8 +243,8 @@ const ManualControls = () => {
               ENGINEER MODE - MANUAL OVERRIDE
               <span
                 className={`ml-2 text-xs ${connectionStatus === "connected"
-                    ? "text-status-active"
-                    : "text-critical"
+                  ? "text-status-active"
+                  : "text-critical"
                   }`}
               >
                 {connectionStatus === "connected" ? "🟢 CONNECTED" : "🔴 DISCONNECTED"}
