@@ -117,6 +117,56 @@ class RobotArm:
                 print(f"❌ Unexpected error during move_to: {e}")
                 return False
 
+    def move_to_sequenced(self, target_angles, speed=1.0):
+        """
+        Moves the robot to the specified angles one servo at a time (Bottom to Top).
+        
+        Args:
+            target_angles (list): List of 6 integers [base, shoulder, elbow, wrist_pitch, wrist_roll, gripper]
+            speed (float): Speed multiplier
+        
+        Returns:
+            bool: True if all steps successful, False otherwise
+        """
+        # Validate input
+        if len(target_angles) != 6:
+            print(f"❌ Error: Expected 6 angles, got {len(target_angles)}")
+            return False
+        
+        # Clamp angles
+        clamped_target = [max(0, min(180, int(angle))) for angle in target_angles]
+        
+        print(f"🔄 Starting Sequenced Move: {self.current_angles} -> {clamped_target}")
+        
+        # Iterate through each servo (0 to 5)
+        for i in range(6):
+            # Create a temporary target that only changes the current servo
+            # We want to keep previous changes, so we start with self.current_angles
+            # But wait, self.current_angles is updated after each move_to call
+            # So we can just copy self.current_angles and update the i-th element
+            
+            # Actually, move_to updates self.current_angles.
+            # So we just need to construct the next step's full configuration.
+            
+            next_step_angles = list(self.current_angles)
+            next_step_angles[i] = clamped_target[i]
+            
+            # Skip if angle is already correct (optimization)
+            if abs(self.current_angles[i] - clamped_target[i]) < 1:
+                continue
+                
+            print(f"   👉 Moving Servo {i} to {clamped_target[i]}°")
+            success = self.move_to(next_step_angles, speed)
+            
+            if not success:
+                print(f"❌ Sequenced move failed at servo {i}")
+                return False
+                
+            # Small delay between servos for visual clarity / stability
+            time.sleep(0.2)
+            
+        return True
+
     def get_status(self):
         """Get current robot status."""
         return {

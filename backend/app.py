@@ -163,7 +163,7 @@ def handle_command():
                         angles = solve_angles(target[0], target[1], target[2], pitch=-90, roll=0)
                         
                         # Move Robot
-                        robot.move_to(angles)
+                        robot.move_to_sequenced(angles)
                         
                         simulated_execution.append({
                             "step": step,
