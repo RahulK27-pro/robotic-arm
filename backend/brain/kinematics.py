@@ -126,3 +126,50 @@ def solve_angles(x, y, z, pitch=0, roll=0):
 
     # All angles are now normalized to 0-180 range
     return [round(a, 2) for a in angles]
+
+def compute_forward_kinematics(angles):
+    """
+    Computes the forward kinematics to get XYZ position from 6 servo angles.
+    Takes servo angles [base, shoulder, elbow, wrist_pitch, wrist_roll, gripper]
+    Returns (x, y, z) position in mm of the end effector.
+    """
+    # Extract angles and convert to radians
+    theta1 = math.radians(angles[0])  # Base rotation
+    theta2 = math.radians(angles[1])  # Shoulder angle
+    theta3 = math.radians(angles[2])  # Elbow angle
+    theta4 = math.radians(angles[3])  # Wrist pitch
+    # angles[4] is wrist roll (doesn't affect XYZ position)
+    # angles[5] is gripper (doesn't affect XYZ position)
+    
+    # Calculate position of each joint in 3D space
+    # Starting from base and working up to end effector
+    
+    # Base height (LINK_1 is vertical from ground to shoulder)
+    z1 = LINK_1
+    
+    # Shoulder to elbow (LINK_2 projects in the plane defined by base rotation)
+    # In the arm's plane, LINK_2 is at angle theta2 from horizontal
+    r2 = LINK_2 * math.cos(theta2)
+    z2 = z1 + LINK_2 * math.sin(theta2)
+    
+    # Elbow to wrist (LINK_3)
+    # The elbow angle theta3 is the internal angle
+    # Global angle of forearm = theta2 + (theta3 - 180) if theta3 is internal
+    # Simplified: accumulated angle = theta2 + theta3
+    forearm_angle = theta2 + theta3 - math.pi  # Assuming theta3=180° is straight
+    r3 = r2 + LINK_3 * math.cos(forearm_angle)
+    z3 = z2 + LINK_3 * math.sin(forearm_angle)
+    
+    # Wrist to gripper (LINK_4)
+    # Similar calculation with wrist pitch
+    # Global pitch = forearm_angle + theta4
+    gripper_angle = forearm_angle + theta4
+    r_final = r3 + LINK_4 * math.cos(gripper_angle)
+    z_final = z3 + LINK_4 * math.sin(gripper_angle)
+    
+    # Convert from polar to cartesian (r, theta1) -> (x, y)
+    x = r_final * math.cos(theta1)
+    y = r_final * math.sin(theta1)
+    z = z_final
+    
+    return (round(x, 1), round(y, 1), round(z, 1))

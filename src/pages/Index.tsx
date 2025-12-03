@@ -20,6 +20,7 @@ const Index = () => {
           <div className="lg:col-span-2 space-y-6">
             <CameraView />
             <Telemetry />
+            <ServoPositionPanel angles={currentServoAngles} />
           </div>
 
           {/* Right Panel: Control Logic */}
@@ -27,7 +28,7 @@ const Index = () => {
             <div className="flex-1">
               <AICommandCenter onServoUpdate={setCurrentServoAngles} />
             </div>
-            <ServoPositionPanel angles={currentServoAngles} />
+
             <ManualControls />
           </div>
         </div>

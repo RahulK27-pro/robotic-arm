@@ -3,7 +3,7 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from camera import VideoCamera
 from brain.llm_engine import process_command
-from brain.kinematics import solve_angles
+from brain.kinematics import solve_angles, compute_forward_kinematics
 from hardware.robot_driver import RobotArm
 import traceback
 import time
@@ -123,9 +123,23 @@ def generate_servo_stream():
     """Generator function for SSE servo updates."""
     while True:
         try:
+            # Calculate XYZ coordinates from current angles
+            x, y, z = compute_forward_kinematics(robot.current_angles)
+            
+            # Determine gripper state based on angle
+            # Typically: 0-60° = CLOSED, 60-180° = OPEN
+            gripper_angle = robot.current_angles[5]
+            gripper_state = "OPEN" if gripper_angle > 60 else "CLOSED"
+            
             # Create data packet
             data = {
                 "angles": robot.current_angles,
+                "coordinates": {
+                    "x": x,
+                    "y": y,
+                    "z": z
+                },
+                "gripper_state": gripper_state,
                 "mode": "simulation" if robot.simulation_mode else "hardware",
                 "connected": robot.serial.is_open if robot.serial else False
             }
