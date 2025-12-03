@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useLogs } from "@/context/LogContext";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Slider } from "@/components/ui/slider";
 import { Button } from "@/components/ui/button";
@@ -52,6 +53,7 @@ const useThrottle = (callback: (...args: any[]) => void, delay: number) => {
 };
 
 const ManualControls = () => {
+  const { addLog } = useLogs();
   const [isOpen, setIsOpen] = useState(true);
   const [base, setBase] = useState([90]);
   const [shoulder, setShoulder] = useState([90]);
@@ -166,6 +168,7 @@ const ManualControls = () => {
       gripper[0],
     ];
     sendAnglesToBackend(finalAngles);
+    addLog("SERVO", `Manual Move: ${finalAngles.map(a => a.toFixed(1)).join(", ")}`);
   };
 
   const handleSavePosition = () => {

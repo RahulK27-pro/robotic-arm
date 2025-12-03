@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { useLogs } from "@/context/LogContext";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,6 +17,7 @@ interface AICommandCenterProps {
 }
 
 const AICommandCenter = ({ onServoUpdate }: AICommandCenterProps) => {
+  const { addLog } = useLogs();
   const [command, setCommand] = useState("");
   const [loading, setLoading] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
@@ -81,16 +83,25 @@ const AICommandCenter = ({ onServoUpdate }: AICommandCenterProps) => {
       let detailedMessage = "";
 
       // Add Vision State
-      detailedMessage += `Vision State: ${JSON.stringify(visionState)}\n\n`;
+      if (Object.keys(visionState).length > 0) {
+        const visionMsg = `Vision State: ${JSON.stringify(visionState)}`;
+        detailedMessage += `${visionMsg}\n\n`;
+        addLog("AI", visionMsg);
+      }
 
       // Add AI Reply
       if (data.reply) {
         detailedMessage += `Reply: ${data.reply}\n\n`;
+        addLog("AI", `Reply: ${data.reply}`);
       }
 
       // Add Plan
       if (data.plan && data.plan.length > 0) {
         detailedMessage += `--- Plan ---\n${JSON.stringify(data.plan, null, 2)}\n\n`;
+        addLog("IK", "Plan generated successfully");
+        data.plan.forEach((step: any, idx: number) => {
+          addLog("IK", `Step ${idx + 1}: ${step.action} - ${step.description || "No description"}`);
+        });
       }
 
       // Add Execution Log with Servo Angles
@@ -98,6 +109,8 @@ const AICommandCenter = ({ onServoUpdate }: AICommandCenterProps) => {
         detailedMessage += `--- Execution Log ---\n`;
         data.execution_log.forEach((log: any, idx: number) => {
           detailedMessage += `Step ${idx + 1}: ${log.status}\n`;
+          addLog("SERVO", `Step ${idx + 1}: ${log.status}`);
+
           if (log.angles) {
             detailedMessage += `  Servo Angles:\n`;
             detailedMessage += `    Base:        ${log.angles[0]}°\n`;
@@ -114,6 +127,7 @@ const AICommandCenter = ({ onServoUpdate }: AICommandCenterProps) => {
           }
           if (log.error) {
             detailedMessage += `  Error: ${log.error}\n`;
+            addLog("ERROR", `Step ${idx + 1} Error: ${log.error}`);
           }
           detailedMessage += `\n`;
         });
@@ -123,12 +137,15 @@ const AICommandCenter = ({ onServoUpdate }: AICommandCenterProps) => {
         addMessage("assistant", detailedMessage);
       } else if (data.error) {
         addMessage("assistant", `Error: ${data.error}`);
+        addLog("ERROR", data.error);
       } else {
         addMessage("assistant", "Received an empty response from the Brain.");
+        addLog("ERROR", "Empty response from Brain");
       }
 
     } catch (error) {
       addMessage("assistant", "Error: Could not connect to backend.");
+      addLog("ERROR", "Could not connect to backend");
       console.error(error);
     } finally {
       setLoading(false);

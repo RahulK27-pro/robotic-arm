@@ -9,20 +9,23 @@ import NotFound from "./pages/NotFound";
 const queryClient = new QueryClient();
 
 import { StatusProvider } from "@/context/StatusContext";
+import { LogProvider } from "@/context/LogContext";
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
       <StatusProvider>
-        <Toaster />
-        <Sonner />
-        <BrowserRouter>
-          <Routes>
-            <Route path="/" element={<Index />} />
-            {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
-            <Route path="*" element={<NotFound />} />
-          </Routes>
-        </BrowserRouter>
+        <LogProvider>
+          <Toaster />
+          <Sonner />
+          <BrowserRouter>
+            <Routes>
+              <Route path="/" element={<Index />} />
+              {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </BrowserRouter>
+        </LogProvider>
       </StatusProvider>
     </TooltipProvider>
   </QueryClientProvider>
