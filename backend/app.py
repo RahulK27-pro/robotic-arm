@@ -53,6 +53,33 @@ def get_detection_result():
     else:
         return jsonify({"status": "searching"})
 
+@app.route('/set_target_object', methods=['POST'])
+def set_target_object():
+    """
+    Set target object for center-seeking mode.
+    Only the specified object will be detected and shown.
+    """
+    try:
+        data = request.json
+        object_name = data.get('object_name')  # e.g., "bottle", "cup"
+        
+        if object_name:
+            global_camera.set_target_object(object_name)
+            return jsonify({
+                "status": "success",
+                "target_object": object_name,
+                "message": f"Target object set to: {object_name}"
+            })
+        else:
+            global_camera.clear_target_object()
+            return jsonify({
+                "status": "success",
+                "target_object": None,
+                "message": "Target object cleared - showing all objects"
+            })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/status', methods=['GET'])
 def status():
     vision_status = "active" if global_camera.video.isOpened() else "inactive"
@@ -172,7 +199,7 @@ def handle_command():
         if not user_text:
             return jsonify({"error": "No command provided"}), 400
 
-        # 1. Prepare Vision State
+        # 1. Prepare Vision State (before setting target)
         vision_state = {}
         if global_camera.last_detection:
             for obj in global_camera.last_detection:
@@ -193,12 +220,58 @@ def handle_command():
                 else:
                     vision_state[key] = [obj['x'], obj['y'], 0] # Fallback to pixels (will need calibration)
 
-        # 2. Call LLM
+        # 2. Call LLM to get plan and target object
         print(f"[DEBUG] Vision state being sent to LLM: {vision_state}")
         print(f"[DEBUG] Detection count: {len(global_camera.last_detection)}")
         llm_response = process_command(user_text, vision_state)
         plan = llm_response.get("plan", [])
         reply = llm_response.get("reply", "")
+        
+        # 3. Extract and set target object for center-seeking
+        target_object = llm_response.get("target_object")
+        if target_object:
+            global_camera.set_target_object(target_object)
+            print(f"[DEBUG] Target object extracted from command: {target_object}")
+            
+            # 4. Wait for object to be detected (search timeout: 5 seconds)
+            search_timeout = 5.0  # seconds
+            search_interval = 0.5  # check every 0.5 seconds
+            elapsed_time = 0.0
+            object_found = False
+            
+            print(f"[INFO] Searching for '{target_object}' (timeout: {search_timeout}s)...")
+            while elapsed_time < search_timeout:
+                # Check if object is now detected
+                if global_camera.last_detection and len(global_camera.last_detection) > 0:
+                    # Object found!
+                    object_found = True
+                    detected_obj = global_camera.last_detection[0]
+                    print(f"[INFO] Found '{target_object}' after {elapsed_time:.1f}s - Error: ({detected_obj['error_x']}, {detected_obj['error_y']})")
+                    
+                    # Update vision state with found object
+                    vision_state = {}
+                    key = target_object.lower().replace(' ', '_')
+                    vision_state[key] = [detected_obj['cm_x'], detected_obj['cm_y'], 0]
+                    break
+                
+                # Wait before checking again
+                time.sleep(search_interval)
+                elapsed_time += search_interval
+            
+            if not object_found:
+                print(f"[WARN] '{target_object}' not found after {search_timeout}s timeout")
+                # Clear target and return error
+                global_camera.clear_target_object()
+                return jsonify({
+                    "status": "success",
+                    "reply": f"I searched for the {target_object} for {search_timeout} seconds but couldn't find it. Please check if the object is in the camera's view.",
+                    "plan": [],
+                    "execution_log": []
+                })
+        else:
+            # If no target object, clear filter to show all objects
+            global_camera.clear_target_object()
+            print(f"[DEBUG] No target object in command - showing all objects")
 
         simulated_execution = []
 

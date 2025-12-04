@@ -23,6 +23,7 @@ You will receive:
 
 You must return a JSON object with the following structure:
 {
+    "target_object": "bottle",  // The PRIMARY object mentioned in the command (e.g., "bottle", "cup", "mouse")
     "plan": [
         {
             "action": "move",
@@ -40,6 +41,12 @@ You must return a JSON object with the following structure:
 }
 
 Rules:
+- **ALWAYS extract the target_object** from the command. This is the main object being manipulated.
+  Examples:
+  - "Pick up the bottle" → target_object = "bottle"
+  - "Move to the cup" → target_object = "cup"
+  - "Find the mouse" → target_object = "mouse"
+  - "Grab the cell phone" → target_object = "cell phone"
 - Return ONLY JSON.
 - If the user provides explicit coordinates (e.g., "at 10, 20, 5"), use those coordinates directly.
 - If no coordinates are provided, look for the object in the vision state.
