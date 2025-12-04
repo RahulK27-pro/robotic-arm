@@ -14,7 +14,8 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-global_camera = VideoCamera()
+# Initialize camera with YOLO detection mode
+global_camera = VideoCamera(detection_mode='yolo')
 # Initialize robot in HARDWARE mode to communicate with Arduino on COM4
 # If Arduino is not connected, it will automatically fall back to simulation mode
 robot = RobotArm(simulation_mode=False, port='COM4', baudrate=115200)
@@ -175,8 +176,17 @@ def handle_command():
         vision_state = {}
         if global_camera.last_detection:
             for obj in global_camera.last_detection:
-                color = obj['color'].lower()
-                key = f"{color}_cube"
+                # Handle YOLO detection format (object_name)
+                if 'object_name' in obj:
+                    object_name = obj['object_name'].lower().replace(' ', '_')
+                    key = object_name
+                # Handle color detection format (color) - for backward compatibility
+                elif 'color' in obj:
+                    color = obj['color'].lower()
+                    key = f"{color}_cube"
+                else:
+                    continue
+                
                 # Prefer CM coordinates if available, else pixel
                 if 'cm_x' in obj:
                     vision_state[key] = [obj['cm_x'], obj['cm_y'], 0] # Assume z=0 for table
@@ -184,6 +194,8 @@ def handle_command():
                     vision_state[key] = [obj['x'], obj['y'], 0] # Fallback to pixels (will need calibration)
 
         # 2. Call LLM
+        print(f"[DEBUG] Vision state being sent to LLM: {vision_state}")
+        print(f"[DEBUG] Detection count: {len(global_camera.last_detection)}")
         llm_response = process_command(user_text, vision_state)
         plan = llm_response.get("plan", [])
         reply = llm_response.get("reply", "")

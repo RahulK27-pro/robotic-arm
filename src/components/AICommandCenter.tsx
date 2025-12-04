@@ -23,7 +23,7 @@ const AICommandCenter = ({ onServoUpdate }: AICommandCenterProps) => {
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
-      content: "AI Command Center initialized. Type colors to search (e.g., 'Find Red and Green').",
+      content: "AI Command Center initialized. YOLO object detection active. Try commands like 'Pick up the bottle' or 'Find the cup'.",
       timestamp: new Date().toLocaleTimeString(),
     },
   ]);
@@ -61,11 +61,24 @@ const AICommandCenter = ({ onServoUpdate }: AICommandCenterProps) => {
       const visionResponse = await fetch("http://localhost:5000/get_detection_result");
       const visionData = await visionResponse.json();
 
-      // Format vision state
+      // Format vision state - handle both YOLO and color detection formats
       let visionState: { [key: string]: [number, number] } = {};
       if (visionData.status === "found" && visionData.data) {
         visionData.data.forEach((obj: any) => {
-          const key = `${obj.color.toLowerCase()}_cube`;
+          let key: string;
+
+          // Handle YOLO detection format (object_name)
+          if (obj.object_name) {
+            key = obj.object_name.toLowerCase().replace(' ', '_');
+          }
+          // Handle color detection format (color) - backward compatibility
+          else if (obj.color) {
+            key = `${obj.color.toLowerCase()}_cube`;
+          }
+          else {
+            return; // Skip if neither field exists
+          }
+
           visionState[key] = [obj.x, obj.y];
         });
       }
@@ -209,7 +222,7 @@ const AICommandCenter = ({ onServoUpdate }: AICommandCenterProps) => {
 
         <div className="flex gap-2">
           <Input
-            placeholder="Type 'Find Red and Green'..."
+            placeholder="Try 'Pick up the bottle' or 'Move to the cup'..."
             value={command}
             onChange={(e) => setCommand(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleSendCommand()}
