@@ -3,7 +3,7 @@ import serial
 from serial import SerialException
 
 class RobotArm:
-    def __init__(self, simulation_mode=True, port='COM4', baudrate=115200, timeout=2):
+    def __init__(self, simulation_mode=True, port='COM4', baudrate=115200, timeout=0.05):
         """
         Initialize the Robotic Arm controller.
         
@@ -114,14 +114,14 @@ class RobotArm:
                 print(f"📤 Sent to Arduino: {packet}")
                 
                 # Wait for confirmation from Arduino
+                # Wait for confirmation from Arduino
+                # Try to read the "K", but don't crash if we miss it
                 try:
-                    confirmation = self.serial.readline().decode('utf-8', errors='ignore').strip()
-                    if confirmation:
-                        print(f"📥 Arduino Reply: {confirmation}")
-                    else:
-                        print("⚠️  No response from Arduino (timeout)")
-                except UnicodeDecodeError:
-                    print("⚠️  Received malformed response from Arduino")
+                    response = self.serial.readline().decode().strip()
+                    if response != 'K':
+                        print("Warning: Arduino sync slip")
+                except:
+                    pass # For a slider, it's okay to skip a confirmation occasionally
                 
                 self.current_angles = clamped_angles
                 return True
