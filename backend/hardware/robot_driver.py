@@ -107,21 +107,27 @@ class RobotArm:
                     self._connect_serial()
                 
                 # Format packet: <90,45,120,90,90,10>
-                packet = f"<{','.join(map(str, clamped_angles))}>"
+                # CRITICAL FIX 1: Force integer conversion (IK returns floats like 45.67882)
+                # CRITICAL FIX 2: Add newline '\n' for Arduino's readStringUntil('\n')
+                int_angles = [int(a) for a in clamped_angles]
+                packet = f"<{','.join(map(str, int_angles))}>"
                 
-                # Send packet
-                self.serial.write(packet.encode('utf-8'))
+                # Send packet WITH newline terminator
+                self.serial.write((packet + '\n').encode('utf-8'))
                 print(f"📤 Sent to Arduino: {packet}")
+
                 
-                # Wait for confirmation from Arduino
                 # Wait for confirmation from Arduino
                 # Try to read the "K", but don't crash if we miss it
                 try:
                     response = self.serial.readline().decode().strip()
-                    if response != 'K':
-                        print("Warning: Arduino sync slip")
+                    if response == 'K':
+                        print("✅ Arduino confirmed")
+                    elif response:
+                        print(f"⚠️  Arduino sent: '{response}' (expected 'K')")
                 except:
                     pass # For a slider, it's okay to skip a confirmation occasionally
+
                 
                 self.current_angles = clamped_angles
                 return True
