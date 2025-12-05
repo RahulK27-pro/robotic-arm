@@ -86,8 +86,8 @@ const ManualControls = () => {
     }
   };
 
-  // Throttled version - sends at most once every 50ms (20 updates/sec)
-  const throttledSend = useThrottle(sendAnglesToBackend, 50);
+  // Throttled version - sends at most once every 100ms (10 updates/sec)
+  const throttledSend = useThrottle(sendAnglesToBackend, 100);
 
   // SSE Connection for real-time updates
   useEffect(() => {
