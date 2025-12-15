@@ -5,6 +5,7 @@ from camera import VideoCamera
 from brain.llm_engine import process_command
 from brain.kinematics import solve_angles, compute_forward_kinematics
 from hardware.robot_driver import RobotArm
+from visual_servoing import VisualServoingAgent
 import traceback
 import time
 import json
@@ -19,6 +20,29 @@ global_camera = VideoCamera(detection_mode='yolo')
 # Initialize robot in HARDWARE mode to communicate with Arduino on COM4
 # If Arduino is not connected, it will automatically fall back to simulation mode
 robot = RobotArm(simulation_mode=False, port='COM4', baudrate=115200)
+servoing_agent = VisualServoingAgent(robot, global_camera)
+
+# ... (Routes) ...
+
+@app.route('/start_servoing', methods=['POST'])
+def start_servoing():
+    data = request.json
+    target_object = data.get('target_object')
+    if not target_object:
+        return jsonify({"error": "Target object required"}), 400
+        
+    servoing_agent.start(target_object)
+    return jsonify({"status": "started", "target": target_object})
+
+@app.route('/stop_servoing', methods=['POST'])
+def stop_servoing():
+    servoing_agent.stop()
+    return jsonify({"status": "stopped"})
+
+@app.route('/servoing_status', methods=['GET'])
+def get_servoing_status():
+    return jsonify(servoing_agent.get_status())
+
 
 def gen(camera):
     while True:
@@ -229,101 +253,40 @@ def handle_command():
         
         # 3. Extract and set target object for center-seeking
         target_object = llm_response.get("target_object")
+        
         if target_object:
-            global_camera.set_target_object(target_object)
             print(f"[DEBUG] Target object extracted from command: {target_object}")
             
-            # 4. Wait for object to be detected (search timeout: 5 seconds)
-            search_timeout = 5.0  # seconds
-            search_interval = 0.5  # check every 0.5 seconds
-            elapsed_time = 0.0
-            object_found = False
-            
-            print(f"[INFO] Searching for '{target_object}' (timeout: {search_timeout}s)...")
-            while elapsed_time < search_timeout:
-                # Check if object is now detected
-                if global_camera.last_detection and len(global_camera.last_detection) > 0:
-                    # Object found!
-                    object_found = True
-                    detected_obj = global_camera.last_detection[0]
-                    print(f"[INFO] Found '{target_object}' after {elapsed_time:.1f}s - Error: ({detected_obj['error_x']}, {detected_obj['error_y']})")
-                    
-                    # Update vision state with found object
-                    vision_state = {}
-                    key = target_object.lower().replace(' ', '_')
-                    vision_state[key] = [detected_obj['cm_x'], detected_obj['cm_y'], 0]
-                    break
+            # TRIGGER VISUAL SERVOING
+            # Use the global instance 'servoing_agent' initialized at start
+            if servoing_agent:
+                # Stop any existing servoing
+                servoing_agent.stop()
+                # Start new servoing
+                servoing_agent.start(target_object)
                 
-                # Wait before checking again
-                time.sleep(search_interval)
-                elapsed_time += search_interval
-            
-            if not object_found:
-                print(f"[WARN] '{target_object}' not found after {search_timeout}s timeout")
-                # Clear target and return error
-                global_camera.clear_target_object()
                 return jsonify({
-                    "status": "success",
-                    "reply": f"I searched for the {target_object} for {search_timeout} seconds but couldn't find it. Please check if the object is in the camera's view.",
+                    "status": "success", 
+                    "reply": f"🚀 Starting visual servoing for '{target_object}'!\n\n"
+                             f"I'm now tracking the {target_object} using the X/Y axis controller.\n"
+                             f"Say 'stop' to cancel.",
                     "plan": [],
                     "execution_log": []
                 })
-        else:
-            # If no target object, clear filter to show all objects
-            global_camera.clear_target_object()
-            print(f"[DEBUG] No target object in command - showing all objects")
-
-        simulated_execution = []
-
-        # 3. Execute Plan (Simulation)
-        for step in plan:
-            if step.get("action") == "move":
-                target = step.get("target") # [x, y, z]
-                if target and len(target) == 3:
-                    try:
-                        # Calculate IK
-                        # Default pitch -90 (downwards), roll 0
-                        angles = solve_angles(target[0], target[1], target[2], pitch=-90, roll=0)
-                        
-                        # Preserve current gripper state
-                        # solve_angles returns 0 for gripper by default, so we overwrite it
-                        angles[5] = robot.current_angles[5]
-
-                        # Move Robot
-                        robot.move_to_sequenced(angles)
-                        
-                        simulated_execution.append({
-                            "step": step,
-                            "angles": angles,
-                            "status": "executed"
-                        })
-                    except ValueError as e:
-                        simulated_execution.append({
-                            "step": step,
-                            "error": str(e),
-                            "status": "failed"
-                        })
-            elif step.get("action") == "grip":
-                angle = step.get("angle")
-                if angle is not None:
-                    # Create new configuration with updated gripper
-                    new_angles = list(robot.current_angles)
-                    new_angles[5] = angle
-                    
-                    # Move Robot
-                    robot.move_to_sequenced(new_angles)
-                    
-                    simulated_execution.append({
-                        "step": step,
-                        "angles": new_angles,
-                        "status": "executed"
-                    })
-
+            else:
+                 return jsonify({
+                    "status": "error",
+                    "reply": "⚠️ Visual Servoing Agent is not initialized.",
+                    "plan": [],
+                    "execution_log": []
+                })
+        
+        # If no target object found or parsed
         return jsonify({
             "status": "success",
-            "reply": reply,
-            "plan": plan,
-            "execution_log": simulated_execution
+            "reply": reply if reply else "I understood the command, but couldn't identify a specific target object to track. Please say 'track the bottle'.",
+            "plan": [],
+            "execution_log": []
         })
 
     except Exception as e:
@@ -332,6 +295,13 @@ def handle_command():
 
 if __name__ == '__main__':
     try:
+        print("\n==================================================================")
+        print(" 🤖 Robotic Arm Backend Started")
+        print(" 📡 API Area: http://localhost:5000")
+        print(" 📸 Vision Stats: http://localhost:5000/servoing_status")
+        print(" ℹ️  To start Auto-Alignment (Visual Servoing):")
+        print("    POST /start_servoing with {'target_object': 'red'}")
+        print("==================================================================\n")
         app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
     finally:
         del global_camera

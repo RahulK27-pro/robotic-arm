@@ -39,7 +39,7 @@ class VideoCamera(object):
         # For YOLO detection mode
         self.yolo_detector = None
         if detection_mode == 'yolo':
-            self.yolo_detector = YOLODetector(confidence_threshold=0.5)
+            self.yolo_detector = YOLODetector(confidence_threshold=0.1)
         
         # Center-seeking state
         self.target_object = None  # Target object name for filtering (e.g., "bottle")
@@ -80,7 +80,7 @@ class VideoCamera(object):
         
         # Initialize YOLO detector if switching to YOLO mode
         if mode == 'yolo' and self.yolo_detector is None:
-            self.yolo_detector = YOLODetector(confidence_threshold=0.5)
+            self.yolo_detector = YOLODetector(confidence_threshold=0.1)
         
         print(f"[INFO] Detection mode set to: {mode}")
     
@@ -124,7 +124,7 @@ class VideoCamera(object):
         Filters to target_object if set, and calculates center alignment errors.
         """
         if self.yolo_detector is None:
-            self.yolo_detector = YOLODetector(confidence_threshold=0.5)
+            self.yolo_detector = YOLODetector(confidence_threshold=0.1)
         
         # Get frame dimensions
         height, width, _ = frame.shape

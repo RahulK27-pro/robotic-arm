@@ -1,6 +1,7 @@
 import time
 import serial
 from serial import SerialException
+from brain.kinematics import solve_angles, compute_forward_kinematics
 
 class RobotArm:
     def __init__(self, simulation_mode=True, port='COM4', baudrate=115200, timeout=0.05):
@@ -73,11 +74,16 @@ class RobotArm:
         # Clamp angles to 0-180 range
         clamped_angles = [max(0, min(180, int(angle))) for angle in angles]
         
+        # Prepare angles for hardware (Invert Wrist Roll at index 4)
+        # User sees 0-180, Hardware needs 180-0 for this specific servo
+        hardware_angles = list(clamped_angles)
+        hardware_angles[4] = 180 - hardware_angles[4]
+        
         if self.simulation_mode:
             # Simulation mode output
-            packet = f"<{','.join(map(str, clamped_angles))}>"
+            packet = f"<{','.join(map(str, hardware_angles))}>"
             print(f"📤 Simulated Command: {packet}")
-            print(f"   [Base: {clamped_angles[0]}°, Shoulder: {clamped_angles[1]}°, Elbow: {clamped_angles[2]}°, WristV: {clamped_angles[3]}°, WristR: {clamped_angles[4]}°, Grip: {clamped_angles[5]}°]")
+            print(f"   [Base: {clamped_angles[0]}°, Shoulder: {clamped_angles[1]}°, Elbow: {clamped_angles[2]}°, WristV: {clamped_angles[3]}°, WristR: {clamped_angles[4]}°(Inv), Grip: {clamped_angles[5]}°]")
             
             # Interpolate movement for smoothness (1.0 second duration)
             duration = 1.0
@@ -107,14 +113,13 @@ class RobotArm:
                     self._connect_serial()
                 
                 # Format packet: <90,45,120,90,90,10>
-                # CRITICAL FIX 1: Force integer conversion (IK returns floats like 45.67882)
-                # CRITICAL FIX 2: Add newline '\n' for Arduino's readStringUntil('\n')
-                int_angles = [int(a) for a in clamped_angles]
+                # Use hardware_angles for transmission
+                int_angles = [int(a) for a in hardware_angles]
                 packet = f"<{','.join(map(str, int_angles))}>"
                 
                 # Send packet WITH newline terminator
                 self.serial.write((packet + '\n').encode('utf-8'))
-                print(f"📤 Sent to Arduino: {packet}")
+                print(f"📤 Sent to Arduino: {packet} (User WristRoll: {clamped_angles[4]}° -> HW: {hardware_angles[4]}°)")
 
                 
                 # Wait for confirmation from Arduino
@@ -129,7 +134,7 @@ class RobotArm:
                     pass # For a slider, it's okay to skip a confirmation occasionally
 
                 
-                self.current_angles = clamped_angles
+                self.current_angles = clamped_angles # Store USER angles
                 return True
                 
             except SerialException as e:
@@ -199,6 +204,79 @@ class RobotArm:
             "connected": self.serial.is_open if self.serial else False
         }
     
+    def read_sensors(self):
+        """
+        Request distance data from Arduino (e.g., HC-SR04).
+        Returns:
+            float: Distance in cm, or -1 if failed.
+        """
+        if self.simulation_mode:
+            return 999.0 # Simulate "far away" if no hardware
+        
+        try:
+            if self.serial is None or not self.serial.is_open:
+                return -1.0
+                
+            # Send request
+            self.serial.write(b'<GET_DIST>\n')
+            
+            # Read response: <12.5>
+            response = self.serial.readline().decode().strip()
+            
+            if response.startswith('<') and response.endswith('>'):
+                dist_str = response[1:-1]
+                return float(dist_str)
+            else:
+                return -1.0
+                
+        except Exception as e:
+            print(f"❌ Sensor read error: {e}")
+            return -1.0
+
+    def update_target_coordinate(self, dx, dy, dz, pitch=-90, roll=0):
+        """
+        Apply Cartesian delta to current position and move robot.
+        
+        Args:
+            dx, dy, dz: Changes in mm/cm (depends on kinematics units, assumed cm)
+            pitch, roll: Target orientation (default -90 vertical down)
+        
+        Returns:
+            bool: True if move successful (reachable), False otherwise
+        """
+        try:
+            # 1. Get current position using Forward Kinematics
+            current_pos = compute_forward_kinematics(self.current_angles)
+            curr_x, curr_y, curr_z = current_pos
+            
+            # 2. Calculate new target
+            target_x = curr_x + dx
+            target_y = curr_y + dy
+            target_z = curr_z + dz
+            
+            # 3. Solve Inverse Kinematics for new target
+            # Note: solve_angles might raise ValueError if out of reach
+            new_angles = solve_angles(target_x, target_y, target_z, pitch, roll)
+            
+            # Preserve gripper angle
+            new_angles[5] = self.current_angles[5]
+            
+            # Print Verbose Feedback for User
+            # Format: [Base, Shldr, Elbw, W1, W2, Grip]
+            diffs = [round(new_angles[i] - self.current_angles[i], 1) for i in range(6)]
+            print(f"🔄 ADJUST: {self.current_angles} -> {new_angles} (Deltas: {diffs})")
+            
+            # 4. Move robot
+            # Use faster Move_To for servoing
+            return self.move_to(new_angles)
+            
+        except ValueError as e:
+            print(f"⚠️ Target out of reach: {e}")
+            return False
+        except Exception as e:
+            print(f"❌ update_target_coordinate error: {e}")
+            return False
+
     def close(self):
         """Close serial connection gracefully."""
         if self.serial and self.serial.is_open:
