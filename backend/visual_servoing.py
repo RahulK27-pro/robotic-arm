@@ -65,16 +65,16 @@ class VisualServoingAgent:
         MAX_STEP = 2.0      # Limit max movement per frame to 2 degrees (Safety)
         
         # Servo Limits (Safety)
-        SERVO_MIN = 10
-        SERVO_MAX = 170
+        SERVO_MIN = 0       # Updated to 0 to match requested start
+        SERVO_MAX = 180     # Updated to 180 to match requested range
         
         # Fixed servo positions
-        BASE_START = 90
-        SHOULDER = 90
-        ELBOW_START = 112
-        WRIST_PITCH = 90
-        WRIST_ROLL = 12
-        GRIPPER = 0
+        BASE_START = 0      # Requested: 0
+        SHOULDER = 45       # Requested: 45
+        ELBOW_START = 115   # Requested: 115
+        WRIST_PITCH = 90    # Requested: 90
+        WRIST_ROLL = 12     # Requested: 12
+        GRIPPER = 170       # Requested: 170
         
         # Initialize
         print(f"Moving to starting position...")
