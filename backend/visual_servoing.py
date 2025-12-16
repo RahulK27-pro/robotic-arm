@@ -18,8 +18,9 @@ class VisualServoingAgent:
         self.thread = None
         self.thread = None
         self.frame_count = 0
-        self.state = "TRACKING"
-        self.search_dir = -1 # -1 for down, 1 for up
+        self.state = "SEARCHING" # Start in searching mode so it moves immediately
+        self.search_dir = 1 # Start sweeping UP from 0
+        self.missed_frames = 0
         
     def start(self, target_object_name):
         """Start X-axis servoing loop."""
@@ -71,7 +72,7 @@ class VisualServoingAgent:
         # Fixed servo positions
         BASE_START = 0      # Requested: 0
         SHOULDER = 45       # Requested: 45
-        ELBOW_START = 115   # Requested: 115
+        ELBOW_START = 130   # Requested: 115
         WRIST_PITCH = 90    # Requested: 90
         WRIST_ROLL = 12     # Requested: 12
         GRIPPER = 170       # Requested: 170
@@ -85,7 +86,26 @@ class VisualServoingAgent:
         print(f"  Wrist Roll: {WRIST_ROLL}° (fixed)")
         print(f"  Gripper: {GRIPPER}° (fixed)")
         
-        self.robot.move_to([BASE_START, SHOULDER, ELBOW_START, WRIST_PITCH, WRIST_ROLL, GRIPPER])
+        # Smooth Startup: Interpolate from current position to start position
+        # to prevent sudden jumps if the robot was in a different pose.
+        start_angles = self.robot.current_angles
+        target_angles = [BASE_START, SHOULDER, ELBOW_START, WRIST_PITCH, WRIST_ROLL, GRIPPER]
+        
+        steps = 40  # 2 seconds (at 0.05s per step)
+        print(f"Moving to starting position (Smoothly over {steps} steps)...")
+        
+        for i in range(1, steps + 1):
+            t = i / steps
+            interp = []
+            for j in range(6):
+                val = start_angles[j] + (target_angles[j] - start_angles[j]) * t
+                interp.append(val)
+            
+            self.robot.move_to(interp)
+            time.sleep(0.05)
+            
+        # Ensure we are exactly at target
+        self.robot.move_to(target_angles)
         time.sleep(1.5)
         
         current_base = BASE_START
@@ -104,24 +124,30 @@ class VisualServoingAgent:
             # STATE: SEARCHING (No Object Detected)
             # -----------------------------------------------------------------
             if not detections:
-                if self.state == "TRACKING":
-                    print(f"[Frame {self.frame_count}] ⚠️ Target lost! Switching to SEARCHING...")
-                    self.state = "SEARCHING"
-                    # Default search direction: Downwards (towards 0) first, as requested
-                    self.search_dir = -1 
+                self.missed_frames += 1
                 
-                # Perform Sweep Step
-                step = 1.0 # Slow search speed (1 degree per frame)
+                # Only switch to SEARCHING if we've lost target for 5+ frames
+                if self.state == "TRACKING":
+                    if self.missed_frames < 5:
+                        print(f"[Frame {self.frame_count}] ⚠️ Target lost ({self.missed_frames}/5)... Holding position.")
+                        time.sleep(0.05)
+                        continue
+                    else:
+                        print(f"[Frame {self.frame_count}] ❌ Target confirmed lost! Switching to SEARCHING...")
+                        self.state = "SEARCHING"
+                
+                # Perform Sweep Step (Only if genuinely searching)
+                step = 3.0 
                 new_base = current_base + (self.search_dir * step)
                 
                 # Check bounds and flip direction
                 if new_base <= SERVO_MIN:
                     new_base = SERVO_MIN
-                    self.search_dir = 1 # Switch to Upwards
+                    self.search_dir = 1 
                     print(f"[Frame {self.frame_count}] 🔄 Reached Min. Sweeping UP...")
                 elif new_base >= SERVO_MAX:
                     new_base = SERVO_MAX
-                    self.search_dir = -1 # Switch to Downwards
+                    self.search_dir = -1 
                     print(f"[Frame {self.frame_count}] 🔄 Reached Max. Sweeping DOWN...")
                 
                 # Move only Base
@@ -129,16 +155,21 @@ class VisualServoingAgent:
                 self.robot.move_to([new_base, SHOULDER, ELBOW_START, WRIST_PITCH, WRIST_ROLL, GRIPPER])
                 current_base = new_base
                 
-                # Don't sleep too long to keep search smooth
                 time.sleep(0.05)
                 continue
 
             # -----------------------------------------------------------------
             # STATE: TRACKING (Object Detected)
             # -----------------------------------------------------------------
+            # Reset missed frames count on any valid detection
+            self.missed_frames = 0
+            
             if self.state == "SEARCHING":
                 print(f"[Frame {self.frame_count}] 🎯 Target FOUND! Switching to TRACKING...")
                 self.state = "TRACKING"
+                # FIX: Sync current_elbow to current physical position (ELBOW_START)
+                # Otherwise it jumps back to the old 'last known' Y-angle from previous tracking
+                current_elbow = ELBOW_START 
             
             # Extract X and Y errors
             error_x = detections[0]['error_x']

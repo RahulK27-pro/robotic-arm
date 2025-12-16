@@ -15,7 +15,7 @@ class RobotArm:
             timeout (int): Serial read timeout in seconds
         """
         self.simulation_mode = simulation_mode
-        self.current_angles = [0, 45, 115, 90, 12, 170]  # Default neutral position
+        self.current_angles = [0, 45, 130, 90, 12, 170]  # Default neutral position
         self.serial = None
         self.port = port
         self.baudrate = baudrate
