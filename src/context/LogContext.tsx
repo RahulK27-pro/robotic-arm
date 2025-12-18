@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useCallback } from "react";
 
-export type LogType = "SYSTEM" | "AI" | "IK" | "SERVO" | "ERROR";
+export type LogType = "SYSTEM" | "AI" | "IK" | "SERVO" | "ERROR" | "AUTO";
 
 export interface LogEntry {
     timestamp: string;

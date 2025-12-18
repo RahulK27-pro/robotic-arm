@@ -71,7 +71,7 @@ class VisualServoingAgent:
         
         # Fixed servo positions
         BASE_START = 0      # Requested: 0
-        SHOULDER = 45       # Requested: 45
+        SHOULDER = 130      # Requested: 130
         ELBOW_START = 130   # Requested: 115
         WRIST_PITCH = 90    # Requested: 90
         WRIST_ROLL = 12     # Requested: 12

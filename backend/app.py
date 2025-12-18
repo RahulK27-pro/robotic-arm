@@ -170,7 +170,42 @@ def get_servo_positions():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
-
+        
+@app.route('/execute_forward_grab', methods=['POST'])
+def execute_forward_grab():
+    """
+    Endpoint to trigger the Forward & Grab sequence.
+    """
+    try:
+        data = request.json
+        distance = data.get('distance')
+        
+        if distance is None:
+            return jsonify({"error": "Distance required"}), 400
+            
+        try:
+            distance = float(distance)
+        except ValueError:
+            return jsonify({"error": "Distance must be a number"}), 400
+            
+        print(f"👉 Received Forward & Grab command: {distance}cm")
+        success = robot.move_forward_grab(distance)
+        
+        if success:
+            return jsonify({
+                "status": "success",
+                "message": f"Moved forward {distance}cm and grabbed.",
+                "angles": robot.current_angles
+            })
+        else:
+            return jsonify({
+                "status": "error", 
+                "message": "Movement failed (likely out of reach)"
+            }), 400
+            
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 def generate_servo_stream():
     """Generator function for SSE servo updates."""
     while True:

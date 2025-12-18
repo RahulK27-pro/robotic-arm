@@ -15,7 +15,7 @@ class RobotArm:
             timeout (int): Serial read timeout in seconds
         """
         self.simulation_mode = simulation_mode
-        self.current_angles = [0, 45, 130, 90, 12, 170]  # Default neutral position
+        self.current_angles = [0, 130, 130, 90, 12, 170]  # Default neutral position
         self.serial = None
         self.port = port
         self.baudrate = baudrate
@@ -73,6 +73,23 @@ class RobotArm:
         
         # Clamp angles to 0-180 range
         clamped_angles = [max(0, min(180, int(angle))) for angle in angles]
+        
+        # -----------------------------------------------------------------
+        # SAFETY LIMITS (HARDWARE PROTECTION)
+        # -----------------------------------------------------------------
+        # Elbow (Index 2): Max 155°
+        if clamped_angles[2] > 155:
+            print(f"⚠️ SAFETY: Clamping Elbow from {clamped_angles[2]}° to 155°")
+            clamped_angles[2] = 155
+            
+        # Gripper (Index 5): Min 120°, Max 170°
+        if clamped_angles[5] < 120:
+             print(f"⚠️ SAFETY: Clamping Gripper from {clamped_angles[5]}° to 120°")
+             clamped_angles[5] = 120
+        elif clamped_angles[5] > 170:
+             print(f"⚠️ SAFETY: Clamping Gripper from {clamped_angles[5]}° to 170°")
+             clamped_angles[5] = 170
+        # -----------------------------------------------------------------
         
         # Prepare angles for hardware (Invert Wrist Roll at index 4)
         # User sees 0-180, Hardware needs 180-0 for this specific servo
@@ -276,6 +293,85 @@ class RobotArm:
         except Exception as e:
             print(f"❌ update_target_coordinate error: {e}")
             return False
+
+    def move_forward_grab(self, distance_cm):
+        """
+        Executes a 'Forward & Grab' sequence:
+        1. Open Gripper
+        2. Move forward (radially) by distance_cm
+        3. Close Gripper
+        
+        Args:
+            distance_cm (float): Distance to extend forward in cm.
+            
+        Returns:
+            bool: True if successful, False otherwise.
+        """
+        import math
+        
+        print(f"🤖 CLOSING DISTANCE: {distance_cm}cm & GRABBING")
+        
+        # 1. Open Gripper
+        print("   👐 Opening Gripper...")
+        current_angles = list(self.current_angles)
+        current_angles[5] = 170 # Open
+        self.move_to(current_angles)
+        time.sleep(0.5)
+        
+        # 2. Move Forward
+        # Calculate Forward Vector based on current Base Angle
+        # Base Angle (0-180) is standard polar angle in our kinematics
+        base_angle_deg = self.current_angles[0]
+        base_angle_rad = math.radians(base_angle_deg)
+        
+        dx = distance_cm * math.cos(base_angle_rad)
+        dy = distance_cm * math.sin(base_angle_rad)
+        
+        print(f"   🚀 Moving Forward: {distance_cm}cm (dx={dx:.1f}, dy={dy:.1f})")
+        
+        # PRESERVE ORIENTATION
+        # Estimate current global pitch/roll to avoid forcing unreachable orientations
+        # From kinematics: pitch = wrist_pitch_raw + angles[1] + angles[2] - 180
+        # This assumes angles are consistent with the IK model
+        curr_base = self.current_angles[0]
+        curr_shoulder = self.current_angles[1]
+        curr_elbow = self.current_angles[2]
+        curr_wrist_p = self.current_angles[3]
+        curr_wrist_r = self.current_angles[4]
+        
+        current_pitch = curr_wrist_p + curr_shoulder + curr_elbow - 180
+        current_roll = curr_wrist_r
+        
+        print(f"   🎯 Preserving Orientation: Pitch={current_pitch:.1f}°, Roll={current_roll:.1f}°")
+        
+        # Try move with preserved orientation
+        move_success = self.update_target_coordinate(dx, dy, 0, pitch=current_pitch, roll=current_roll)
+        
+        if not move_success:
+            print(f"   ❌ Move failed - Target likely out of reach.")
+            # Retry with Pitch=0 (Horizontal Reach) if the preserved pitch failed?
+            # Often preserved pitch might be weird if the arm is folded.
+            # Let's try one fallback: Horizontal grab (Pitch 0).
+            print("   ⚠️ Retrying with Horizontal Pitch (0°)...")
+            move_success = self.update_target_coordinate(dx, dy, 0, pitch=0, roll=current_roll)
+            
+            if not move_success:
+                print("   ❌ Move failed again - Target DEFINITELY out of reach.")
+                return False
+            else:
+                 print("   ✅ Recovery Successful with Horizontal Pitch!")
+
+        time.sleep(0.5)
+        
+        # 3. Close Gripper
+        print("   🤏 Closing Gripper...")
+        current_angles = list(self.current_angles) # Update with new position
+        current_angles[5] = 30 # Closed (Tight)
+        self.move_to(current_angles)
+        time.sleep(0.5)
+        
+        print("✅ Grab Sequence Complete")
+        return True
 
     def close(self):
         """Close serial connection gracefully."""

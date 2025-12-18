@@ -43,6 +43,8 @@ const SystemLogs = () => {
         return "text-blue-400";
       case "ERROR":
         return "text-critical";
+      case "AUTO":
+        return "text-purple-400";
       default:
         return "text-foreground";
     }

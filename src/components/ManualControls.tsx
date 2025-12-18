@@ -8,7 +8,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { ChevronDown, Settings, Save, Play, StopCircle } from "lucide-react";
+import { ChevronDown, Settings, Save, Play, StopCircle, MoveRight } from "lucide-react";
 import { toast } from "sonner";
 
 interface Position {
@@ -67,6 +67,50 @@ const ManualControls = () => {
   const [isSending, setIsSending] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<"connected" | "disconnected">("disconnected");
+  const [grabDistance, setGrabDistance] = useState("5");
+
+  const handleForwardGrab = async () => {
+    try {
+      const dist = parseFloat(grabDistance);
+      if (isNaN(dist) || dist <= 0) {
+        toast.error("Invalid distance");
+        return;
+      }
+
+      setIsSending(true);
+      toast.info(`Attempting to grab at ${dist}cm...`);
+
+      const response = await fetch(`${API_BASE}/execute_forward_grab`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ distance: dist }),
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        toast.success("Grab successful!");
+        addLog("AUTO", `Grabbed at ${dist}cm`);
+        // Update sliders if returned
+        if (data.angles) {
+          setBase([data.angles[0]]);
+          setShoulder([data.angles[1]]);
+          setElbow([data.angles[2]]);
+          setWristPitch([data.angles[3]]);
+          setWristRoll([data.angles[4]]);
+          setGripper([data.angles[5]]);
+        }
+      } else {
+        toast.error("Grab failed", { description: data.message || "Unknown error" });
+        addLog("ERROR", `Grab failed: ${data.message}`);
+      }
+    } catch (error) {
+      console.error("Grab error", error);
+      toast.error("Network error");
+    } finally {
+      setIsSending(false);
+    }
+  };
 
   // Send angles to backend
   const sendAnglesToBackend = async (angles: number[]) => {
@@ -400,6 +444,30 @@ const ManualControls = () => {
               <div className="flex justify-between text-xs text-muted-foreground">
                 <span>FAST (100ms)</span>
                 <span>SLOW (3000ms)</span>
+              </div>
+            </div>
+
+            {/* Forward & Grab Control */}
+            <div className="space-y-2 pt-4 border-t border-border">
+              <div className="flex justify-between items-center">
+                <span className="data-label text-xs">CLOSE DISTANCE (CM)</span>
+                <span className="data-value text-lg">{grabDistance} cm</span>
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  value={grabDistance}
+                  onChange={(e) => setGrabDistance(e.target.value)}
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                />
+                <Button
+                  onClick={handleForwardGrab}
+                  className="bg-accent text-accent-foreground hover:bg-accent/90 shrink-0"
+                  disabled={isSending}
+                >
+                  <MoveRight className="h-4 w-4 mr-2" />
+                  MOVE & GRAB
+                </Button>
               </div>
             </div>
 
