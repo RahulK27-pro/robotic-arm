@@ -3,15 +3,22 @@ import cv2
 import numpy as np
 from coordinate_mapper import CoordinateMapper
 from yolo_detector import YOLODetector
+from brain.distance_estimator import (
+    estimate_distance_from_detection,
+    get_object_pixel_width,
+    FOCAL_LENGTH_DEFAULT,
+    KNOWN_OBJECT_WIDTHS
+)
 
 class VideoCamera(object):
-    def __init__(self, detection_mode='yolo', center_tolerance=25):
+    def __init__(self, detection_mode='yolo', center_tolerance=25, focal_length_override=None):
         """
         Initialize VideoCamera.
         
         Args:
             detection_mode: 'yolo' for object detection or 'color' for color-based detection
             center_tolerance: Pixel tolerance for "centered" alignment (default: 25)
+            focal_length_override: Override focal length (pixels) for calibration (default: None uses 1110)
         """
         camera_index = int(os.environ.get("CAMERA_INDEX", 0))
         
@@ -28,6 +35,18 @@ class VideoCamera(object):
             print(f"[ERROR] Could not open video device {camera_index}.")
             # We don't raise exception here to allow app to start, but status will be inactive
         else:
+            # Force 720p resolution for accurate focal length calibration
+            self.video.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            self.video.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            
+            # Verify resolution was set
+            actual_width = int(self.video.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_height = int(self.video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            print(f"[INFO] Camera resolution set to: {actual_width}x{actual_height}")
+            
+            if actual_width != 1280 or actual_height != 720:
+                print(f"[WARN] Could not set 720p. Using {actual_width}x{actual_height}")
+            
             print(f"[INFO] Camera {camera_index} opened successfully.")
         
         # Detection mode: 'yolo' or 'color'
@@ -47,6 +66,17 @@ class VideoCamera(object):
         
         self.last_detection = [] # Stores list of all detections
         self.mapper = None # Initialize mapper lazily when we have frame dimensions
+        
+        # Distance Estimation (Logitech C270 at 1280x720)
+        # Allow override for calibration
+        if focal_length_override is not None:
+            self.focal_length = focal_length_override
+            print(f"[INFO] Distance estimation enabled (Focal Length: {self.focal_length}px - OVERRIDE)")
+        else:
+            self.focal_length = FOCAL_LENGTH_DEFAULT  # 1110 pixels
+            print(f"[INFO] Distance estimation enabled (Focal Length: {self.focal_length}px)")
+        
+        self.known_object_widths = KNOWN_OBJECT_WIDTHS
         
         self.color_ranges = {
             "Red": [
@@ -159,6 +189,16 @@ class VideoCamera(object):
             # Check if centered (within tolerance)
             is_centered = abs(error_x) <= self.center_tolerance and abs(error_y) <= self.center_tolerance
             
+            # Calculate distance using pinhole camera model
+            distance_cm = estimate_distance_from_detection(det, self.focal_length)
+            
+            # If distance cannot be estimated (unknown object), set to -1
+            if distance_cm == -1.0:
+                distance_cm = -1.0
+                distance_status = "UNKNOWN"
+            else:
+                distance_status = f"{distance_cm:.1f}cm"
+            
             self.last_detection.append({
                 'object_name': det['object_name'],
                 'confidence': det['confidence'],
@@ -172,7 +212,10 @@ class VideoCamera(object):
                 'error_y': error_y,           # Pixels from center (+ = above, - = below)
                 'direction_x': direction_x,   # Direction to move arm
                 'direction_y': direction_y,   # Direction to move arm
-                'is_centered': is_centered    # True if within tolerance
+                'is_centered': is_centered,   # True if within tolerance
+                # Distance estimation
+                'distance_cm': distance_cm,   # Estimated distance to object
+                'distance_status': distance_status  # Formatted distance string
             })
         
         # Draw detections on frame (only target object if filter is active)
@@ -234,6 +277,15 @@ class VideoCamera(object):
             # Show target object name at top of bottom section
             cv2.putText(frame, f"Target: {self.target_object}", (50, height - 150),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            
+            # Display distance estimation
+            if det['distance_cm'] > 0:
+                distance_color = (0, 255, 0) if det['is_centered'] else (0, 165, 255)
+                cv2.putText(frame, f"Distance: {det['distance_cm']:.1f} cm", (50, height - 190),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, distance_color, 2)
+            else:
+                cv2.putText(frame, "Distance: UNKNOWN", (50, height - 190),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (128, 128, 128), 2)
         
         # Print detection status
         if self.last_detection:

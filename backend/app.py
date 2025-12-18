@@ -6,6 +6,7 @@ from brain.llm_engine import process_command
 from brain.kinematics import solve_angles, compute_forward_kinematics
 from hardware.robot_driver import RobotArm
 from visual_servoing import VisualServoingAgent
+from brain.grab_controller import VisualGrabController
 import traceback
 import time
 import json
@@ -21,6 +22,8 @@ global_camera = VideoCamera(detection_mode='yolo')
 # If Arduino is not connected, it will automatically fall back to simulation mode
 robot = RobotArm(simulation_mode=False, port='COM4', baudrate=115200)
 servoing_agent = VisualServoingAgent(robot, global_camera)
+# Initialize grab controller
+grab_controller = VisualGrabController(robot, global_camera, servoing_agent)
 
 # ... (Routes) ...
 
@@ -42,6 +45,64 @@ def stop_servoing():
 @app.route('/servoing_status', methods=['GET'])
 def get_servoing_status():
     return jsonify(servoing_agent.get_status())
+
+@app.route('/start_visual_grab', methods=['POST'])
+def start_visual_grab():
+    """
+    Start complete visual grab sequence.
+    Combines X/Y alignment, Z-axis approach, and grab execution.
+    """
+    try:
+        data = request.json
+        target_object = data.get('target_object')
+        
+        if not target_object:
+            return jsonify({"error": "Target object required"}), 400
+        
+        # Stop any existing servoing
+        if servoing_agent.running:
+            servoing_agent.stop()
+        
+        # Start grab sequence
+        success = grab_controller.start_grab(target_object)
+        
+        if success:
+            return jsonify({
+                "status": "started",
+                "target": target_object,
+                "message": f"Visual grab started for '{target_object}'"
+            })
+        else:
+            return jsonify({
+                "error": "Grab already in progress"
+            }), 400
+            
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/stop_visual_grab', methods=['POST'])
+def stop_visual_grab():
+    """
+    Stop visual grab sequence.
+    """
+    try:
+        grab_controller.stop()
+        return jsonify({"status": "stopped"})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/visual_grab_status', methods=['GET'])
+def get_visual_grab_status():
+    """
+    Get current visual grab status.
+    """
+    try:
+        return jsonify(grab_controller.get_status())
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 def gen(camera):
