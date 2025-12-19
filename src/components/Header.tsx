@@ -46,6 +46,13 @@ const Header = () => {
             variant="destructive"
             size="lg"
             className="bg-critical hover:bg-critical/90 text-critical-foreground font-bold tracking-wider shadow-lg shadow-critical/20"
+            onClick={async () => {
+              try {
+                await fetch("http://localhost:5000/emergency_stop", { method: "POST" });
+              } catch (e) {
+                console.error("Failed to trigger stop", e);
+              }
+            }}
           >
             <AlertCircle className="mr-2 h-5 w-5" />
             EMERGENCY STOP

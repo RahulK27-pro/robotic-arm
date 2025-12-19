@@ -312,7 +312,8 @@ class VideoCamera(object):
                 'is_centered': is_centered,   # True if within tolerance
                 # Distance estimation
                 'distance_cm': distance_cm,   # Estimated distance to object
-                'distance_status': distance_status  # Formatted distance string
+                'distance_status': distance_status,  # Formatted distance string
+                'timestamp': time.time()      # Detection timestamp for latency checks
             })
         
         # Atomic swap
@@ -473,7 +474,8 @@ class VideoCamera(object):
                             "x": dx,      # Relative pixel x (for UI/Center offset)
                             "y": dy,      # Relative pixel y
                             "cm_x": cm_x, # Real-world x in cm
-                            "cm_y": cm_y  # Real-world y in cm
+                            "cm_y": cm_y, # Real-world y in cm
+                            "timestamp": time.time()
                         })
                         
                         # Visual feedback - use different colors for different target colors

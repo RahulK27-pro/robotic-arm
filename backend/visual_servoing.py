@@ -2,13 +2,14 @@ import time
 import threading
 from hardware.robot_driver import RobotArm
 from camera import VideoCamera
+from brain.kinematics import compute_forward_kinematics
+import math
 
 class VisualServoingAgent:
     """
-    X-Axis Only Visual Servoing Agent
+    Visual Servoing Agent (3-Stage: Align -> Stalk -> Grab)
     
-    Purpose: Center a target object horizontally by rotating the base servo.
-    Other axes remain fixed.
+    Purpose: Center a target object and approach it dynamically using visual feedback.
     """
     
     def __init__(self, robot: RobotArm, camera: VideoCamera):
@@ -17,7 +18,7 @@ class VisualServoingAgent:
         self.running = False
         self.thread = None
         self.frame_count = 0
-        self.state = "SEARCHING" # Start in searching mode so it moves immediately
+        self.state = "SEARCHING" # Start in searching mode
         self.search_dir = 1 # Start sweeping UP from 0
         self.missed_frames = 0
         
@@ -28,7 +29,7 @@ class VisualServoingAgent:
         self.grab_distance = 2.0  # cm - close gripper when this close
         
     def start(self, target_object_name):
-        """Start X-axis servoing loop."""
+        """Start servoing loop."""
         if self.running:
             return
             
@@ -38,67 +39,63 @@ class VisualServoingAgent:
         
         self.thread = threading.Thread(target=self._servoing_loop, daemon=True)
         self.thread.start()
-        print(f"🚀 X-Axis Servoing STARTED for '{target_object_name}'")
+        print(f"🚀 Servoing STARTED for '{target_object_name}'")
         
     def stop(self):
         """Stop servoing loop."""
         self.running = False
         if self.thread:
             self.thread.join(timeout=1.0)
-        print("🛑 X-Axis Servoing STOPPED")
+        print("🛑 Servoing STOPPED")
         
     def get_status(self):
         """Get current servoing status."""
         return {
             "active": self.running,
-            "mode": "x_axis_only"
+            "mode": "3_stage_stalk"
         }
 
     def _servoing_loop(self):
         """
-        X/Y AXIS VISUAL SERVOING
+        STAGE 1: COARSE ALIGNMENT
         
         Controls base (X-axis) and elbow (Y-axis) to center target.
+        Does NOT move forward (Z-axis). This ensures we are looking at the object
+        straight-on before we start the approach.
         """
         print("=" * 60)
-        print("🎯 X/Y AXIS VISUAL SERVOING - STARTING")
+        print("🎯 VISUAL SERVOING - STAGE 1: COARSE ALIGNMENT")
         print("=" * 60)
         
         # Configuration (TUNED FOR STABILITY)
-        GAIN_X = 0.02       # Reduced from 0.05 to reduce oscillation
-        GAIN_Y = 0.02       # Reduced from 0.05 to reduce oscillation
-        DEADZONE = 20       # Centered if error < 20px
-        MAX_STEP = 2.0      # Limit max movement per frame to 2 degrees (Safety)
+        # Adaptive Gain Limits - ULTRA STABLE (User Requested)
+        GAIN_HIGH = 0.01    # Drastically reduced from 0.04
+        GAIN_LOW = 0.005    # Drastically reduced from 0.015
+        
+        DEADZONE = 30       
+        MAX_STEP = 1.0      # Max 1 degree per frame
+        MIN_MOVE = 1.0      # Minimum move to overcome stiction
         
         # Servo Limits (Safety)
-        SERVO_MIN = 0       # Updated to 0 to match requested start
-        SERVO_MAX = 180     # Updated to 180 to match requested range
+        SERVO_MIN = 0       
+        SERVO_MAX = 180     
         
-        # Fixed servo positions
-        BASE_START = 0      # Requested: 0
-        SHOULDER = 130      # Requested: 130
-        ELBOW_START = 130   # Requested: 115
-        WRIST_PITCH = 90    # Requested: 90
-        WRIST_ROLL = 12     # Requested: 12
-        GRIPPER = 170       # Requested: 170
+        # Fixed servo positions for Stage 1
+        BASE_START = 0      
+        SHOULDER = 130      # High view
+        ELBOW_START = 130   
+        WRIST_PITCH = 90    
+        WRIST_ROLL = 12     
+        GRIPPER = 170       # Open
         
-        # Initialize
+        # Initialize: Move to Start Position
         print(f"Moving to starting position...")
-        print(f"  Base: {BASE_START}° (will track X)")
-        print(f"  Shoulder: {SHOULDER}° (fixed)")
-        print(f"  Elbow: {ELBOW_START}° (will track Y)")
-        print(f"  Wrist Pitch: {WRIST_PITCH}° (fixed)")
-        print(f"  Wrist Roll: {WRIST_ROLL}° (fixed)")
-        print(f"  Gripper: {GRIPPER}° (fixed)")
         
-        # Smooth Startup: Interpolate from current position to start position
-        # to prevent sudden jumps if the robot was in a different pose.
+        # Smooth Startup
         start_angles = self.robot.current_angles
         target_angles = [BASE_START, SHOULDER, ELBOW_START, WRIST_PITCH, WRIST_ROLL, GRIPPER]
         
-        steps = 40  # 2 seconds (at 0.05s per step)
-        print(f"Moving to starting position (Smoothly over {steps} steps)...")
-        
+        steps = 40  
         for i in range(1, steps + 1):
             t = i / steps
             interp = []
@@ -109,49 +106,45 @@ class VisualServoingAgent:
             self.robot.move_to(interp)
             time.sleep(0.05)
             
-        # Ensure we are exactly at target
+        # Ensure exact
         self.robot.move_to(target_angles)
         time.sleep(1.5)
         
         current_base = BASE_START
         current_elbow = ELBOW_START
-        print("\n✅ Ready! Tracking X/Y...\n")
         
-        # Main loop
+        print("\n✅ Ready! Aligning X/Y before approach...\n")
+        
+        # Main monitoring loop
         while self.running:
             self.frame_count += 1
             
-            # detections are now updated in the background thread!
-            # We just poll the latest results.
+            # Get detections
             detections = self.camera.last_detection
             
-            # If no detection, wait a bit for the background thread to catch up
             if not detections:
                 time.sleep(0.1)
                 detections = self.camera.last_detection
 
-            
             # -----------------------------------------------------------------
             # STATE: SEARCHING (No Object Detected)
             # -----------------------------------------------------------------
             if not detections:
                 self.missed_frames += 1
                 
-                # Only switch to SEARCHING if we've lost target for 5+ frames
                 if self.state == "TRACKING":
                     if self.missed_frames < 5:
-                        print(f"[Frame {self.frame_count}] ⚠️ Target lost ({self.missed_frames}/5)... Holding position.")
+                        # Brief loss, hold position
                         time.sleep(0.05)
                         continue
                     else:
                         print(f"[Frame {self.frame_count}] ❌ Target confirmed lost! Switching to SEARCHING...")
                         self.state = "SEARCHING"
                 
-                # Perform Sweep Step (Only if genuinely searching)
+                # Perform Sweep
                 step = 3.0 
                 new_base = current_base + (self.search_dir * step)
                 
-                # Check bounds and flip direction
                 if new_base <= SERVO_MIN:
                     new_base = SERVO_MIN
                     self.search_dir = 1 
@@ -161,8 +154,6 @@ class VisualServoingAgent:
                     self.search_dir = -1 
                     print(f"[Frame {self.frame_count}] 🔄 Reached Max. Sweeping DOWN...")
                 
-                # Move only Base
-                print(f"[Frame {self.frame_count}] 🔍 SEARCHING... Base: {current_base:.1f}° → {new_base:.1f}°")
                 self.robot.move_to([new_base, SHOULDER, ELBOW_START, WRIST_PITCH, WRIST_ROLL, GRIPPER])
                 current_base = new_base
                 
@@ -170,208 +161,251 @@ class VisualServoingAgent:
                 continue
 
             # -----------------------------------------------------------------
-            # STATE: TRACKING (Object Detected)
+            # STATE: TRACKING / ALIGNING
             # -----------------------------------------------------------------
-            # Reset missed frames count on any valid detection
             self.missed_frames = 0
             
             if self.state == "SEARCHING":
                 print(f"[Frame {self.frame_count}] 🎯 Target FOUND! Switching to TRACKING...")
                 self.state = "TRACKING"
-                # FIX: Sync current_elbow to current physical position (ELBOW_START)
-                # Otherwise it jumps back to the old 'last known' Y-angle from previous tracking
+                # Sync elbow to avoid jump
                 current_elbow = ELBOW_START 
             
-            # Extract X and Y errors
+            # Extract Errors
             error_x = detections[0]['error_x']
             error_y = detections[0]['error_y']
             
-            # Check centering status
+            # Alignment Check
             x_centered = abs(error_x) < DEADZONE
             y_centered = abs(error_y) < DEADZONE
             
+            # Success Condition
             if x_centered and y_centered:
-                # Object is centered!
                 self.centered_frames += 1
-                print(f"[Frame {self.frame_count}] ✅ FULLY CENTERED! X={error_x}px, Y={error_y}px ({self.centered_frames}/{self.required_centered_frames})")
+                print(f"[Frame {self.frame_count}] ✅ ALIGNED! X={error_x}px, Y={error_y}px ({self.centered_frames}/{self.required_centered_frames})")
                 
-                # Check if we should start approaching
+                # If stable, proceed to Stalking
                 if self.enable_grab and self.centered_frames >= self.required_centered_frames:
-                    print("\n" + "=" * 60)
-                    print("🚀 CENTERING COMPLETE! Starting APPROACH mode...")
-                    print("=" * 60)
+                    print("\n🚀 ALIGNMENT COMPLETE! Starting STAGE 2: STALKING...")
                     self.state = "APPROACHING"
                     self.centered_frames = 0
                     
-                    # Open gripper
-                    print("Opening gripper...")
-                    self.robot.move_to([current_base, SHOULDER, current_elbow, WRIST_PITCH, WRIST_ROLL, 170])
-                    time.sleep(0.5)
-                    
-                    # Start approach loop
+                    # Hand over control to Approach Routine
                     self._approach_and_grab(current_base, SHOULDER, current_elbow, WRIST_PITCH, WRIST_ROLL)
-                    return  # Exit servoing loop
+                    return  # Exit the loop (job done or failed inside approach)
                 
                 time.sleep(0.1)
                 continue
             else:
-                # Not centered, reset counter
                 self.centered_frames = 0
             
-            # SEQUENTIAL LOGIC: X First, Then Y
+            # Corrections
+            # Priority: X then Y
             if not x_centered:
-                # ---------------------------------------------------------
-                # PHASE 1: X-Axis Correction (Base)
-                # ---------------------------------------------------------
-                # error_x > 0: object LEFT → rotate RIGHT → INCREASE angle
-                raw_correction = (error_x * GAIN_X)
+                # ADAPTIVE GAIN
+                current_gain = GAIN_HIGH if abs(error_x) > 100 else GAIN_LOW
                 
-                # Clamp step size to prevent jumping
-                correction_x = max(-MAX_STEP, min(MAX_STEP, raw_correction))
+                raw_correction = (error_x * current_gain)
+                
+                # MIN-MOVE THRESHOLD (Anti-Stiction)
+                if abs(raw_correction) < 0.5:
+                    correction_x = 0 # Ignore micro-jitters
+                elif abs(raw_correction) < MIN_MOVE:
+                    # Force minimum move if significant enough
+                    correction_x = MIN_MOVE * (1 if raw_correction > 0 else -1)
+                else:
+                    correction_x = raw_correction
+                
+                correction_x = max(-MAX_STEP, min(MAX_STEP, correction_x))
                 
                 new_base = current_base + correction_x
-                new_base = max(SERVO_MIN, min(SERVO_MAX, new_base)) # Safety limits
+                new_base = max(SERVO_MIN, min(SERVO_MAX, new_base))
                 
-                # Y stays fixed
                 new_elbow = current_elbow
                 
                 dir_x = "RIGHT" if correction_x > 0 else "LEFT"
-                print(f"[Frame {self.frame_count}] X-ALIGN: {error_x:+4.0f}px → {dir_x} {abs(correction_x):.2f}° (Base: {current_base:.1f}°→{new_base:.1f}°)")
+                print(f"[Frame {self.frame_count}] X-ALIGN (G={current_gain}): {error_x:+4.0f}px → {dir_x} {abs(correction_x):.2f}°")
                 
-            else:
-                # ---------------------------------------------------------
-                # PHASE 2: Y-Axis Correction (Elbow) - Only after X is good
-                # ---------------------------------------------------------
-                # User Feedback: "increasing angle moves down, decreasing moves up"
-                # If Object is UP (error_y > 0), we need to move UP.
-                # So we need to DECREASE angle.
-                # Formula: correction = -(error * gain)
+            else: # X is good, fix Y
+                # ADAPTIVE GAIN
+                current_gain = GAIN_HIGH if abs(error_y) > 100 else GAIN_LOW
                 
-                raw_correction = -(error_y * GAIN_Y)
+                raw_correction = -(error_y * current_gain) # Angle up = move down
                 
-                # Clamp step size
-                correction_y = max(-MAX_STEP, min(MAX_STEP, raw_correction))
+                # MIN-MOVE THRESHOLD
+                if abs(raw_correction) < 0.5:
+                    correction_y = 0
+                elif abs(raw_correction) < MIN_MOVE:
+                    correction_y = MIN_MOVE * (1 if raw_correction > 0 else -1)
+                else:
+                    correction_y = raw_correction
+                
+                correction_y = max(-MAX_STEP, min(MAX_STEP, correction_y))
                 
                 new_elbow = current_elbow + correction_y
-                # SAFETY: Cap elbow at 150° maximum
-                new_elbow = max(SERVO_MIN, min(150, new_elbow))  # Changed from SERVO_MAX to 150
+                new_elbow = max(SERVO_MIN, min(150, new_elbow))
                 
-                # X stays fixed
                 new_base = current_base
                 
                 dir_y = "UP" if correction_y < 0 else "DOWN"
-                print(f"[Frame {self.frame_count}] Y-ALIGN: {error_y:+4.0f}px → {dir_y} {abs(correction_y):.2f}° (Elbow: {current_elbow:.1f}°→{new_elbow:.1f}°)")
+                print(f"[Frame {self.frame_count}] Y-ALIGN (G={current_gain}): {error_y:+4.0f}px → {dir_y} {abs(correction_y):.2f}°")
             
-            # Move servos
-            angles_to_send = [new_base, SHOULDER, new_elbow, WRIST_PITCH, WRIST_ROLL, GRIPPER]
-            self.robot.move_to(angles_to_send)
+            # Execute Move
+            self.robot.move_to([new_base, SHOULDER, new_elbow, WRIST_PITCH, WRIST_ROLL, GRIPPER])
             
             current_base = new_base
             current_elbow = new_elbow
-            
             time.sleep(0.05)
     
     def _approach_and_grab(self, base, shoulder, elbow, wrist_pitch, wrist_roll):
         """
-        Approach object while maintaining center alignment.
-        Moves shoulder and elbow based on distance, adjusts base for X-centering.
+        STAGE 2 & 3: STALKING AND BLIND COMMIT
+        
+        Move forward (Z-axis) while maintaining alignment (X-axis).
+        Stop when close (Blind Zone) and commit to grab.
         """
         from brain.visual_ik_solver import get_wrist_angles, check_reachability
         
-        print("\n🚀 PHASE: APPROACHING WITH ALIGNMENT")
-        print("-" * 60)
+        print("\n" + "=" * 60)
+        print("� STAGE 2: STALKING (Dynamic Approach)")
+        print("=" * 60)
         
-        GAIN_X = 0.03
-        MAX_BASE_STEP = 2.0
-        DEADZONE = 20
-        MAX_ITERATIONS = 100
-        TIMEOUT = 30.0
+        # Tuning Parameters
+        GAIN_X_STALK = 0.005 # Extremely low for stalking
+        MAX_BASE_STEP = 1.0  # Max 1 degree correction
+        BLIND_ZONE = 5.0     
+        TIMEOUT = 40.0
         
         current_base = base
         start_time = time.time()
         iteration = 0
+        last_target_dist = 30.0 # Default fallback
+        last_processed_time = 0
         
-        while self.running and iteration < MAX_ITERATIONS:
-            # Check timeout
+        # Ensure gripper is open
+        self.robot.move_to([current_base, shoulder, elbow, wrist_pitch, wrist_roll, 170])
+        time.sleep(0.2)
+        
+        while self.running:
+            # Safety Timeout
             if time.time() - start_time > TIMEOUT:
                 print("❌ Approach timeout")
                 return
             
-            # Get detection
+            # Get Visual Data
             detections = self.camera.last_detection
+            
+            # STALE DATA CHECK
+            if detections:
+                det_time = detections[0].get('timestamp', 0)
+                if det_time <= last_processed_time:
+                    time.sleep(0.05)
+                    continue
+                last_processed_time = det_time
+                
             if not detections:
-                print(f"[{iteration}] ⚠️ Object lost")
+                print(f"[{iteration}] ⚠️ Object lost during stalk")
                 time.sleep(0.1)
-                iteration += 1
+                iteration += 1 # Keep counting iterations
                 continue
             
             det = detections[0]
             error_x = det.get('error_x', 0)
-            distance_cm = det.get('distance_cm', -1)
+            target_dist = det.get('distance_cm', -1)
             
-            if distance_cm <= 0:
-                print(f"[{iteration}] ⚠️ Cannot estimate distance")
-                time.sleep(0.1)
-                iteration += 1
-                continue
+            if target_dist <= 0:
+                time.sleep(0.1); continue
+                
+            last_target_dist = target_dist
             
-            # Check if within grab range
-            if distance_cm <= self.grab_distance:
-                print(f"\n✅ OBJECT WITHIN REACH! Distance: {distance_cm:.1f}cm")
+            # --- CALCULATE GEOMETRY ---
+            # 1. Get current robotic reach (horizontal distance from base)
+            curr_pos = compute_forward_kinematics(self.robot.current_angles)
+            curr_reach = math.sqrt(curr_pos[0]**2 + curr_pos[1]**2)
+            
+            # 2. Estimate remaining gap
+            # Camera is on the arm/gripper, so target_dist IS the gap.
+            gap = target_dist
+            
+            # --- STAGE 2 EXIT CONDITION: BLIND ZONE ---
+            if gap <= BLIND_ZONE:
+                print(f"\n🙈 ENTERING BLIND ZONE! Gap: {gap:.1f}cm (< {BLIND_ZONE}cm) | Dist: {target_dist:.1f}cm")
                 break
+                
+            # --- STALKING MOVEMENT ---
+            # 1. Calculate new reach (Move forward gently)
+            # Step size proportional to gap, but max 1cm for smooth approach
+            # We want to INCREASE reach to close the gap.
+            step = max(0.5, min(1.0, gap * 0.10))
+            next_reach = curr_reach + step
             
-            # Check reachability
-            reachable, reason, _ = check_reachability(distance_cm, object_height_cm=5.0)
-            if not reachable:
-                print(f"❌ {reason}")
-                return
-            
-            # Calculate IK for current distance
-            angles = get_wrist_angles(distance_cm, object_height_cm=5.0)
+            # 2. Solve IK for next reach
+            angles = get_wrist_angles(next_reach, object_height_cm=5.0)
             if angles is None:
-                print(f"❌ IK failed for distance {distance_cm:.1f}cm")
+                # Fallback: If we are close (gap < 10), try to just reach max and grab?
+                # For now, just stop to prevent crash
+                print(f"❌ Reach limit encountered! ({next_reach:.1f}cm)")
+                if gap < 10.0:
+                    print("⚠️ Close enough? Attempting Blind Grab from here...")
+                    last_target_dist = gap # Update last known
+                    break # Force jump to stage 3
                 return
             
-            shoulder_target, elbow_target = angles
+            sh_target, el_target = angles
+            el_target = min(150, el_target) # Safety caps
             
-            # SAFETY: Cap elbow at 150° maximum
-            elbow_target = min(150, elbow_target)
+            # 3. Calculate Base Correction (Smoother)
+            # We correct X even while moving Z
+            base_corr = error_x * GAIN_X_STALK
+            base_corr = max(-MAX_BASE_STEP, min(MAX_BASE_STEP, base_corr))
             
-            # Calculate base adjustment for X-centering
-            base_correction = error_x * GAIN_X
-            base_correction = max(-MAX_BASE_STEP, min(MAX_BASE_STEP, base_correction))
-            
-            new_base = current_base + base_correction
+            new_base = current_base + base_corr
             new_base = max(0, min(180, new_base))
             
-            # Check if centered
-            is_centered = abs(error_x) < DEADZONE
-            center_status = "✓" if is_centered else "✗"
+            # Move Robot
+            status_icon = "✓" if abs(error_x) < 20 else "drift"
+            print(f"STALK: Dist={target_dist:.1f}cm | Gap={gap:.1f}cm | Step={step:.1f} | X-Err={error_x:+3.0f} ({status_icon})")
             
-            print(f"[{iteration:3d}] Dist:{distance_cm:5.1f}cm | ErrX:{error_x:+4.0f}px | Centered:{center_status} | Base:{current_base:.0f}°→{new_base:.0f}° | Sh:{shoulder_target:.0f}° El:{elbow_target:.0f}°")
-            
-            # Move robot
-            self.robot.move_to([new_base, shoulder_target, elbow_target, wrist_pitch, wrist_roll, 170])
+            self.robot.move_to([new_base, sh_target, el_target, wrist_pitch, wrist_roll, 170])
             
             current_base = new_base
             iteration += 1
-            time.sleep(0.15)
+            time.sleep(0.1) # Stabilization delay
+            
+            
+        # --- STAGE 3: BLIND COMMIT ---
+        print("\n" + "=" * 60)
+        print("👊 STAGE 3: BLIND COMMIT (Open Loop Grab)")
+        print("=" * 60)
         
-        # Close gripper
-        print("\n🤏 CLOSING GRIPPER")
-        print("-" * 60)
-        self.robot.move_to([current_base, shoulder_target, elbow_target, wrist_pitch, wrist_roll, 120])
-        time.sleep(0.8)
+        # Use last known target distance to finalize the grab
+        # We add a small over-reach (1.0cm) to ensure the gripper surrounds the object
+        # Since last_target_dist is the GAP, we need to add it to current reach.
+        curr_pos = compute_forward_kinematics(self.robot.current_angles)
+        curr_reach = math.sqrt(curr_pos[0]**2 + curr_pos[1]**2)
+        
+        final_reach = curr_reach + last_target_dist + 1.5 
+        print(f"Pushing blindly to final reach: {final_reach:.1f}cm (Current: {curr_reach:.1f}cm + Gap: {last_target_dist:.1f}cm + 1.5cm)")
+        
+        final_angles = get_wrist_angles(final_reach, object_height_cm=5.0)
+        if final_angles:
+             s, e = final_angles
+             e = min(150, e)
+             self.robot.move_to([current_base, s, e, wrist_pitch, wrist_roll, 170])
+             time.sleep(0.5)
+        else:
+            print("❌ Could not compute final grab angles.")
+            return
+
+        # Close Gripper
+        print("🤏 CLOSING GRIPPER (Force)")
+        self.robot.move_to([current_base, s, e, wrist_pitch, wrist_roll, 90]) # Tight grip
+        time.sleep(1.0)
         
         # Lift
-        print("\n📦 LIFTING OBJECT")
-        print("-" * 60)
-        shoulder_target += 15
-        shoulder_target = min(180, shoulder_target)
-        self.robot.move_to([current_base, shoulder_target, elbow_target, wrist_pitch, wrist_roll, 120])
+        print("📦 LIFTING OBJECT")
+        s_lift = max(0, min(180, s + 20)) # Lift 20 deg
+        self.robot.move_to([current_base, s_lift, e, wrist_pitch, wrist_roll, 90])
         time.sleep(0.5)
         
-        print("\n" + "=" * 60)
-        print("✅ GRAB COMPLETE!")
-        print("=" * 60)
-
+        print("\n✅ GRAB SEQUENCE COMPLETE!")

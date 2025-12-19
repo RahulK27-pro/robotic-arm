@@ -208,6 +208,34 @@ def generate_servo_stream():
             print(f"Stream error: {e}")
             break
 
+@app.route('/emergency_stop', methods=['POST'])
+def emergency_stop():
+    """
+    Emergency Stop: Immediately kills the backend process.
+    """
+    try:
+        print("!!! EMERGENCY STOP TRIGGERED !!!")
+        if robot:
+             # Attempt to detach/stop servos if possible (though we are killing process immediately)
+             pass
+        
+        # Return response before dying so frontend knows it worked
+        response = jsonify({"status": "stopping", "message": "Backend shutting down immediately"})
+        
+        # Schedule death in 1 second to allow response to send
+        import threading
+        import os
+        def kill_server():
+            time.sleep(1)
+            print("Force exiting...")
+            os._exit(1)
+            
+        threading.Thread(target=kill_server).start()
+        
+        return response
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/servo_stream')
 def servo_stream():
     """Endpoint for Server-Sent Events of servo positions."""
