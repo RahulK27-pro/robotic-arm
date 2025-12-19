@@ -45,8 +45,8 @@ def main():
     print(f"   Distance: {known_distance}cm")
     print(f"\nStarting camera... Press 'c' to capture, 'q' to quit")
     
-    # Initialize camera
-    camera_index = int(os.environ.get("CAMERA_INDEX", 0))
+    # Initialize camera (using external webcam)
+    camera_index = int(os.environ.get("CAMERA_INDEX", 1))
     cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
     
     # Force 720p

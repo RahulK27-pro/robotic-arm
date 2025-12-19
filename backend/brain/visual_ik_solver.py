@@ -18,13 +18,13 @@ import math
 # Physical Constants (User Confirmed)
 SHOULDER_LENGTH = 15.0  # cm (L1)
 ELBOW_LENGTH = 13.0     # cm (L2)
-GRIPPER_LENGTH = 13.0   # cm
+GRIPPER_LENGTH = 12.0   # cm (User confirmed)
 SAFETY_OFFSET = 2.0     # cm (buffer before touching object)
 
 # Calculated Limits
-MAX_ARM_REACH = SHOULDER_LENGTH + ELBOW_LENGTH  # 28cm (wrist)
-MAX_GRAB_REACH = MAX_ARM_REACH + GRIPPER_LENGTH  # 41cm (gripper tip)
-SAFE_GRAB_RANGE = MAX_GRAB_REACH - SAFETY_OFFSET  # 39cm
+MAX_ARM_REACH = SHOULDER_LENGTH + ELBOW_LENGTH  # 28cm (wrist position)
+MAX_GRAB_REACH = MAX_ARM_REACH + GRIPPER_LENGTH  # 40cm (gripper tip)
+SAFE_GRAB_RANGE = MAX_GRAB_REACH - SAFETY_OFFSET  # 38cm
 
 
 def check_reachability(object_distance_cm, object_height_cm=5.0):
@@ -44,8 +44,9 @@ def check_reachability(object_distance_cm, object_height_cm=5.0):
             print(f"Cannot reach: {reason}")
     """
     # Calculate where the wrist needs to be
-    # Wrist Target = Object Distance - Gripper Length - Safety Offset
-    wrist_target_distance = object_distance_cm - GRIPPER_LENGTH - SAFETY_OFFSET
+    # Wrist Target = Object Distance (from gripper) - Safety Offset
+    # Note: Input object_distance_cm is now assumed to be relative to the gripper
+    wrist_target_distance = object_distance_cm - SAFETY_OFFSET
     
     # Check if too close (inside the gripper length)
     if wrist_target_distance < 5.0:
@@ -84,7 +85,7 @@ def get_wrist_angles(object_distance_cm, object_height_cm=5.0,
         tuple: (shoulder_angle, elbow_angle) in degrees, or None if unreachable
     
     Math:
-        1. Wrist Target = Object Distance - Gripper Length - Safety Offset
+        1. Wrist Target = Object Distance - Safety Offset
         2. Hypotenuse = sqrt(wrist_target² + height²)
         3. Shoulder Angle = atan2(height, wrist_target) + acos((L1² + hyp² - L2²) / (2×L1×hyp))
         4. Elbow Angle = acos((L1² + L2² - hyp²) / (2×L1×L2))

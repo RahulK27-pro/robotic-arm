@@ -15,10 +15,10 @@ Camera Specifications (Logitech C270):
 import math
 
 
-# Camera Configuration (Logitech C270 at 1280x720)
+# Camera Configuration (External Webcam at 1280x720)
 CAMERA_WIDTH = 1280
 CAMERA_HEIGHT = 720
-FOCAL_LENGTH_DEFAULT = 1110  # pixels (60° FOV)
+FOCAL_LENGTH_DEFAULT = 1424  # pixels (calibrated with 4cm object at 27cm)
 
 
 def calibrate_focal_length(known_distance_cm, known_width_cm, pixel_width):
@@ -131,8 +131,8 @@ def get_object_pixel_height(bbox):
 # Known object dimensions (in cm)
 # These are real-world measurements of common objects
 KNOWN_OBJECT_WIDTHS = {
-    'cube': 3.0,        # Test cube (user confirmed)
-    'bottle': 6.0,      # Standard water bottle diameter
+    'cube': 4.0,        # Test cube (user confirmed 4cm)
+    'bottle': 4.0,      # Test object (user using 4cm cube/bottle interchangeably)
     'cup': 8.0,         # Standard coffee cup diameter
     'cell phone': 7.0,  # Average smartphone width
     'book': 15.0,       # Standard paperback width

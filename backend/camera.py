@@ -1,5 +1,6 @@
-import os
 import cv2
+import threading
+import time
 import numpy as np
 from coordinate_mapper import CoordinateMapper
 from yolo_detector import YOLODetector
@@ -9,6 +10,9 @@ from brain.distance_estimator import (
     FOCAL_LENGTH_DEFAULT,
     KNOWN_OBJECT_WIDTHS
 )
+from brain.visual_ik_solver import GRIPPER_LENGTH
+import os
+import threading
 
 class VideoCamera(object):
     def __init__(self, detection_mode='yolo', center_tolerance=25, focal_length_override=None):
@@ -18,22 +22,48 @@ class VideoCamera(object):
         Args:
             detection_mode: 'yolo' for object detection or 'color' for color-based detection
             center_tolerance: Pixel tolerance for "centered" alignment (default: 25)
-            focal_length_override: Override focal length (pixels) for calibration (default: None uses 1110)
+            focal_length_override: Override focal length (pixels) for calibration (default: None uses 1424)
         """
-        camera_index = int(os.environ.get("CAMERA_INDEX", 0))
+        # Try to find a working camera index
+        target_index = int(os.environ.get("CAMERA_INDEX", 1))
         
-        # Try initializing with CAP_DSHOW first (better for Windows)
-        print(f"[INFO] Attempting to open camera {camera_index} with CAP_DSHOW...")
-        self.video = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+        # Backends to try for Windows compatibility
+        backends = [
+            ("DSHOW", cv2.CAP_DSHOW),
+            ("MSMF", cv2.CAP_MSMF),
+            ("DEFAULT", cv2.CAP_ANY)
+        ]
         
-        # Fallback to default backend if failed
-        if not self.video.isOpened():
-            print(f"[WARN] Failed to open camera with CAP_DSHOW. Retrying with default backend...")
-            self.video = cv2.VideoCapture(camera_index)
-            
-        if not self.video.isOpened():
-            print(f"[ERROR] Could not open video device {camera_index}.")
-            # We don't raise exception here to allow app to start, but status will be inactive
+        self.video = cv2.VideoCapture()
+        opened = False
+        camera_index = -1
+        
+        # Try target index FIRST with all backends
+        print(f"[INFO] Targeting external camera index: {target_index}")
+        for b_name, b_val in backends:
+            print(f"[INFO] Trying camera {target_index} with {b_name}...")
+            self.video.open(target_index, b_val)
+            if self.video.isOpened():
+                print(f"[SUCCESS] Camera {target_index} opened with {b_name}!")
+                opened = True
+                camera_index = target_index
+                break
+        
+        # ONLY if target failed, try index 0 as fallback
+        if not opened and target_index != 0:
+            print(f"[WARN] Camera {target_index} failed. Falling back to index 0...")
+            for b_name, b_val in backends:
+                print(f"[INFO] Trying camera 0 with {b_name}...")
+                self.video.open(0, b_val)
+                if self.video.isOpened():
+                    print(f"[INFO] Camera 0 opened with {b_name}.")
+                    opened = True
+                    camera_index = 0
+                    break
+                
+        if not opened:
+            print(f"[ERROR] CRITICAL: Could not open ANY camera device (tried index {target_index} and 0).")
+            print("[TIP] Ensure your external webcam is plugged in and not in use by another app (Zoom, Teams, etc.)")
         else:
             # Force 720p resolution for accurate focal length calibration
             self.video.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -47,7 +77,7 @@ class VideoCamera(object):
             if actual_width != 1280 or actual_height != 720:
                 print(f"[WARN] Could not set 720p. Using {actual_width}x{actual_height}")
             
-            print(f"[INFO] Camera {camera_index} opened successfully.")
+            print(f"[INFO] Camera {camera_index} is READY.")
         
         # Detection mode: 'yolo' or 'color'
         self.detection_mode = detection_mode
@@ -93,8 +123,73 @@ class VideoCamera(object):
                 (np.array([20, 100, 100]), np.array([30, 255, 255]))
             ]
         }
+        
+        # Threading support
+        self.lock = threading.Lock()
+        self.raw_frame = None
+        self.processed_jpeg = None
+        self.stopped = False
+        
+        # Start background capture thread
+        print("[INFO] Starting background capture thread...")
+        self.thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self.thread.start()
+
+    def _capture_loop(self):
+        """
+        Background thread to continuously read and process frames.
+        Ensures thread-safety and consistent FPS for all consumers.
+        """
+        while not self.stopped:
+            if not self.video.isOpened():
+                time.sleep(0.5)
+                continue
+                
+            success, image = self.video.read()
+            if not success:
+                time.sleep(0.01)
+                continue
+                
+            # Store raw frame
+            self.raw_frame = image.copy()
+            
+            # Process frame based on current detection mode
+            # This is the ONLY place where camera processing happens
+            height, width, _ = image.shape
+            cx, cy = width // 2, height // 2
+            
+            # Simple visual guides (always present)
+            cv2.line(image, (cx - 20, cy), (cx + 20, cy), (200, 200, 200), 1)
+            cv2.line(image, (cx, cy - 20), (cx, cy + 20), (200, 200, 200), 1)
+            
+            if self.detection_mode == 'yolo':
+                image = self.find_objects_yolo(image)
+                cv2.putText(image, "Mode: YOLO", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            elif self.target_colors:
+                image = self.find_objects(image)
+                cv2.putText(image, "Mode: Color", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            else:
+                cv2.putText(image, "Mode: Idle", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            
+            # Encode result to JPEG
+            ret, jpeg = cv2.imencode('.jpg', image)
+            if ret:
+                self.processed_jpeg = jpeg.tobytes()
+                
+            # Small yield to prevent CPU hogging if capture is uncapped
+            time.sleep(0.01)
 
     def __del__(self):
+        self.stop()
+
+    def stop(self):
+        """Stop the camera and capture thread."""
+        self.stopped = True
+        if hasattr(self, 'thread'):
+            self.thread.join(timeout=1.0)
         self.video.release()
     
     def set_detection_mode(self, mode):
@@ -168,8 +263,8 @@ class VideoCamera(object):
         if self.target_object:
             detections = [d for d in detections if d['object_name'].lower() == self.target_object]
         
-        # Update last_detection with YOLO results + center-seeking data
-        self.last_detection = []
+        # Update results in a thread-safe way using a local list
+        new_detections = []
         for det in detections:
             # Calculate object center from bounding box
             bbox = det['bbox']
@@ -197,9 +292,11 @@ class VideoCamera(object):
                 distance_cm = -1.0
                 distance_status = "UNKNOWN"
             else:
+                # Calculate distance relative to gripper
+                distance_cm = max(0.0, distance_cm - GRIPPER_LENGTH)
                 distance_status = f"{distance_cm:.1f}cm"
             
-            self.last_detection.append({
+            new_detections.append({
                 'object_name': det['object_name'],
                 'confidence': det['confidence'],
                 'x': det['relative_pos'][0],  # Relative pixel x
@@ -217,6 +314,9 @@ class VideoCamera(object):
                 'distance_cm': distance_cm,   # Estimated distance to object
                 'distance_status': distance_status  # Formatted distance string
             })
+        
+        # Atomic swap
+        self.last_detection = new_detections
         
         # Draw detections on frame (only target object if filter is active)
         frame = self.yolo_detector.draw_detections(frame, detections)
@@ -279,9 +379,9 @@ class VideoCamera(object):
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
             
             # Display distance estimation
-            if det['distance_cm'] > 0:
+            if det['distance_cm'] >= 0:
                 distance_color = (0, 255, 0) if det['is_centered'] else (0, 165, 255)
-                cv2.putText(frame, f"Distance: {det['distance_cm']:.1f} cm", (50, height - 190),
+                cv2.putText(frame, f"Gripper Dist: {det['distance_cm']:.1f} cm", (50, height - 190),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, distance_color, 2)
             else:
                 cv2.putText(frame, "Distance: UNKNOWN", (50, height - 190),
@@ -331,8 +431,8 @@ class VideoCamera(object):
         if self.mapper is None:
             self.mapper = CoordinateMapper(width, height)
 
-        # Reset detection list
-        self.last_detection = []
+        # Reset detection list (local for thread-safety)
+        new_detections = []
         
         # Process each target color
         for color_name in self.target_colors:
@@ -368,7 +468,7 @@ class VideoCamera(object):
                         cm_x, cm_y = self.mapper.pixel_to_cm(cx, cy)
 
                         # Add to detection list
-                        self.last_detection.append({
+                        new_detections.append({
                             "color": color_name,
                             "x": dx,      # Relative pixel x (for UI/Center offset)
                             "y": dy,      # Relative pixel y
@@ -392,6 +492,9 @@ class VideoCamera(object):
                         cv2.putText(frame, text, (cx - 30, cy - 20), 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, box_color, 2)
         
+        # Atomic swap
+        self.last_detection = new_detections
+        
         if self.last_detection:
             count = len(self.last_detection)
             colors_str = ", ".join(self.target_colors)
@@ -403,28 +506,8 @@ class VideoCamera(object):
         return frame
 
     def get_frame(self):
-        success, image = self.video.read()
-        if not success:
-            return None
-            
-        height, width, _ = image.shape
-        cx, cy = width // 2, height // 2
-        cv2.line(image, (cx - 20, cy), (cx + 20, cy), (200, 200, 200), 1)
-        cv2.line(image, (cx, cy - 20), (cx, cy + 20), (200, 200, 200), 1)
-        
-        # Use YOLO or color detection based on mode
-        if self.detection_mode == 'yolo':
-            image = self.find_objects_yolo(image)
-            # Add mode indicator
-            cv2.putText(image, "Mode: YOLO Detection", (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        elif self.target_colors:
-            image = self.find_objects(image)
-            cv2.putText(image, "Mode: Color Detection", (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-        else:
-            cv2.putText(image, "Mode: Idle (No Target)", (10, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
-        ret, jpeg = cv2.imencode('.jpg', image)
-        return jpeg.tobytes()
+        """
+        Returns the latest processed frame as JPEG bytes.
+        This no longer calls read() directly, making it thread-safe.
+        """
+        return self.processed_jpeg

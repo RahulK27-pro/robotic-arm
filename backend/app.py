@@ -6,7 +6,6 @@ from brain.llm_engine import process_command
 from brain.kinematics import solve_angles, compute_forward_kinematics
 from hardware.robot_driver import RobotArm
 from visual_servoing import VisualServoingAgent
-from brain.grab_controller import VisualGrabController
 import traceback
 import time
 import json
@@ -22,8 +21,6 @@ global_camera = VideoCamera(detection_mode='yolo')
 # If Arduino is not connected, it will automatically fall back to simulation mode
 robot = RobotArm(simulation_mode=False, port='COM4', baudrate=115200)
 servoing_agent = VisualServoingAgent(robot, global_camera)
-# Initialize grab controller
-grab_controller = VisualGrabController(robot, global_camera, servoing_agent)
 
 # ... (Routes) ...
 
@@ -46,72 +43,19 @@ def stop_servoing():
 def get_servoing_status():
     return jsonify(servoing_agent.get_status())
 
-@app.route('/start_visual_grab', methods=['POST'])
-def start_visual_grab():
-    """
-    Start complete visual grab sequence.
-    Combines X/Y alignment, Z-axis approach, and grab execution.
-    """
-    try:
-        data = request.json
-        target_object = data.get('target_object')
-        
-        if not target_object:
-            return jsonify({"error": "Target object required"}), 400
-        
-        # Stop any existing servoing
-        if servoing_agent.running:
-            servoing_agent.stop()
-        
-        # Start grab sequence
-        success = grab_controller.start_grab(target_object)
-        
-        if success:
-            return jsonify({
-                "status": "started",
-                "target": target_object,
-                "message": f"Visual grab started for '{target_object}'"
-            })
-        else:
-            return jsonify({
-                "error": "Grab already in progress"
-            }), 400
-            
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
 
-@app.route('/stop_visual_grab', methods=['POST'])
-def stop_visual_grab():
-    """
-    Stop visual grab sequence.
-    """
-    try:
-        grab_controller.stop()
-        return jsonify({"status": "stopped"})
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/visual_grab_status', methods=['GET'])
-def get_visual_grab_status():
-    """
-    Get current visual grab status.
-    """
-    try:
-        return jsonify(grab_controller.get_status())
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
 
 
 def gen(camera):
     while True:
         frame = camera.get_frame()
         if frame is None:
+            time.sleep(0.01)
             continue
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n\r\n')
+        # Cap to ~30 FPS
+        time.sleep(0.03)
 
 @app.route('/video_feed')
 def video_feed():
@@ -232,41 +176,7 @@ def get_servo_positions():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
         
-@app.route('/execute_forward_grab', methods=['POST'])
-def execute_forward_grab():
-    """
-    Endpoint to trigger the Forward & Grab sequence.
-    """
-    try:
-        data = request.json
-        distance = data.get('distance')
-        
-        if distance is None:
-            return jsonify({"error": "Distance required"}), 400
-            
-        try:
-            distance = float(distance)
-        except ValueError:
-            return jsonify({"error": "Distance must be a number"}), 400
-            
-        print(f"👉 Received Forward & Grab command: {distance}cm")
-        success = robot.move_forward_grab(distance)
-        
-        if success:
-            return jsonify({
-                "status": "success",
-                "message": f"Moved forward {distance}cm and grabbed.",
-                "angles": robot.current_angles
-            })
-        else:
-            return jsonify({
-                "status": "error", 
-                "message": "Movement failed (likely out of reach)"
-            }), 400
-            
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+
 def generate_servo_stream():
     """Generator function for SSE servo updates."""
     while True:

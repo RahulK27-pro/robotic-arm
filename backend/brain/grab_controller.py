@@ -56,8 +56,8 @@ class VisualGrabController:
         
         # Configuration
         self.xy_tolerance = 20  # pixels (for centering)
-        self.distance_tolerance = 2.0  # cm (when to stop approaching)
-        self.target_distance = 15.0  # cm (gripper_length + safety_offset)
+        self.distance_tolerance = 2.0  # cm (precision tolerance)
+        self.target_distance = 2.0  # cm (SAFETY_OFFSET from gripper)
         self.approach_step_size = 0.5  # cm per iteration
         self.max_approach_iterations = 50
         self.alignment_timeout = 10.0  # seconds
@@ -265,9 +265,9 @@ class VisualGrabController:
             
             print(f"   Iteration {iteration}: Distance = {current_distance:.1f}cm")
             
-            # Check if ready to grab (within 2cm)
-            if current_distance <= 2.0:
-                print(f"✅ Ready to grab! Distance: {current_distance:.1f}cm")
+            # Check if ready to grab (within range: gripper_length + safety_offset)
+            if current_distance <= self.target_distance:
+                print(f"✅ Ready to grab! Distance: {current_distance:.1f}cm (Threshold: {self.target_distance}cm)")
                 
                 # Close gripper
                 print("   🤏 Closing gripper...")
