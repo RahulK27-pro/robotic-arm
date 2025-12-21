@@ -8,7 +8,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { ChevronDown, Settings, Save, Play, StopCircle } from "lucide-react";
+import { ChevronDown, Settings } from "lucide-react";
 import { toast } from "sonner";
 
 interface Position {
@@ -403,42 +403,6 @@ const ManualControls = () => {
               <div className="flex justify-between text-xs text-muted-foreground">
                 <span>FAST (100ms)</span>
                 <span>SLOW (3000ms)</span>
-              </div>
-            </div>
-
-
-
-            {/* Action Buttons */}
-            <div className="space-y-3 pt-4 border-t border-border">
-              <Button
-                onClick={handleSavePosition}
-                className="w-full bg-primary text-primary-foreground hover:bg-primary/90"
-                size="lg"
-              >
-                <Save className="h-4 w-4 mr-2" />
-                SAVE POSITION ({savedPositions.length})
-              </Button>
-
-              <div className="grid grid-cols-2 gap-3">
-                <Button
-                  onClick={handlePlayMovements}
-                  disabled={isPlaying || savedPositions.length === 0}
-                  className="bg-status-active text-foreground hover:bg-status-active/90"
-                  size="lg"
-                >
-                  <Play className="h-4 w-4 mr-2" />
-                  PLAY
-                </Button>
-
-                <Button
-                  onClick={handleStopMovement}
-                  disabled={!isPlaying}
-                  className="bg-critical text-critical-foreground hover:bg-critical/90"
-                  size="lg"
-                >
-                  <StopCircle className="h-4 w-4 mr-2" />
-                  STOP
-                </Button>
               </div>
             </div>
           </CardContent>
