@@ -129,6 +129,7 @@ class VideoCamera(object):
         self.raw_frame = None
         self.processed_jpeg = None
         self.stopped = False
+        self.pause_yolo = False  # Flag to pause YOLO processing
         
         # Start background capture thread
         print("[INFO] Starting background capture thread...")
@@ -152,6 +153,18 @@ class VideoCamera(object):
                 
             # Store raw frame
             self.raw_frame = image.copy()
+            
+            # Skip YOLO processing if paused (e.g., during mimic mode)
+            if self.pause_yolo:
+                # Just show raw frame with "YOLO PAUSED" text
+                display_frame = image.copy()
+                cv2.putText(display_frame, "YOLO PAUSED", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                ret, jpeg = cv2.imencode('.jpg', display_frame)
+                if ret:
+                    self.processed_jpeg = jpeg.tobytes()
+                time.sleep(0.01)
+                continue
             
             # Process frame based on current detection mode
             # This is the ONLY place where camera processing happens
@@ -513,3 +526,18 @@ class VideoCamera(object):
         This no longer calls read() directly, making it thread-safe.
         """
         return self.processed_jpeg
+    
+    def get_raw_frame(self):
+        """
+        Returns the latest raw frame (numpy array) for processing.
+        Used by mimic mode for MediaPipe hand detection.
+        """
+        return self.raw_frame
+    
+    def get_frame_with_detections(self):
+        """
+        Returns the latest frame with YOLO detections as JPEG bytes.
+        Same as get_frame() but explicitly named for clarity.
+        """
+        return self.processed_jpeg
+

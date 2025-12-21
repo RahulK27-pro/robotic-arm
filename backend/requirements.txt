@@ -2,6 +2,8 @@ flask
 flask-cors
 opencv-python
 numpy
-groq
 python-dotenv
 pyserial
+mediapipe==0.10.9
+protobuf==3.20.3
+ultralytics

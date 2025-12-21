@@ -6,9 +6,13 @@ from brain.llm_engine import process_command
 from brain.kinematics import solve_angles, compute_forward_kinematics
 from hardware.robot_driver import RobotArm
 from visual_servoing import VisualServoingAgent
+from features.mimic_logic import MimicController
 import traceback
 import time
 import json
+import threading
+import cv2
+import numpy as np
 
 load_dotenv()
 
@@ -42,6 +46,86 @@ def stop_servoing():
 @app.route('/servoing_status', methods=['GET'])
 def get_servoing_status():
     return jsonify(servoing_agent.get_status())
+
+# --- MIMIC MODE INTEGRATION ---
+mimic_thread = None
+mimic_ctrl = MimicController(robot, global_camera)
+
+@app.route('/mimic_start', methods=['POST'])
+def start_mimic():
+    global mimic_thread
+    print("[DEBUG] /mimic_start endpoint called", flush=True)
+    print(f"[DEBUG] Current thread status: {mimic_thread.is_alive() if mimic_thread else 'None'}", flush=True)
+    print(f"[DEBUG] mimic_ctrl.active: {mimic_ctrl.active}", flush=True)
+    
+    if mimic_thread is None or not mimic_thread.is_alive():
+        print("[DEBUG] Starting new mimic thread...", flush=True)
+        
+        # Pause YOLO detection to prevent terminal spam
+        global_camera.pause_yolo = True
+        print("[INFO] YOLO detection paused", flush=True)
+        
+        mimic_thread = threading.Thread(target=mimic_ctrl.start)
+        mimic_thread.daemon = True
+        mimic_thread.start()
+        print("[DEBUG] Mimic thread started", flush=True)
+        return jsonify({"status": "started", "message": "Mimic Mode Active"})
+    else:
+        print("[DEBUG] Thread already running", flush=True)
+        return jsonify({"status": "already_running"})
+
+@app.route('/mimic_stop', methods=['POST'])
+def stop_mimic():
+    mimic_ctrl.stop()
+    
+    # Resume YOLO detection
+    global_camera.pause_yolo = False
+    print("[INFO] YOLO detection resumed", flush=True)
+    
+    return jsonify({"status": "stopped", "message": "Mimic Mode Stopping..."})
+
+@app.route('/mimic_telemetry', methods=['GET'])
+def get_mimic_telemetry():
+    """Get current mimic mode telemetry (error_x, error_y, reach, gripper)"""
+    telemetry = mimic_ctrl.get_telemetry()
+    telemetry["active"] = mimic_ctrl.active
+    return jsonify(telemetry)
+
+def gen_mimic(camera):
+    """Generator for mimic mode video feed with ONLY hand overlay (no YOLO)"""
+    while True:
+        # Get raw frame without YOLO processing
+        raw_frame = camera.get_raw_frame()
+        if raw_frame is None:
+            time.sleep(0.01)
+            continue
+        
+        # Create a copy for processing
+        img = raw_frame.copy()
+        
+        # Add "Mode: HAND TRACKING" text
+        cv2.putText(img, "Mode: HAND TRACKING", (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        # Add hand landmarks if mimic mode is active
+        if mimic_ctrl.active:
+            img = mimic_ctrl.draw_hand_overlay(img)
+        
+        # Encode to JPEG
+        _, jpeg = cv2.imencode('.jpg', img)
+        frame = jpeg.tobytes()
+        
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n\r\n')
+        time.sleep(0.03)
+
+@app.route('/mimic_video_feed')
+def mimic_video_feed():
+    """Video feed endpoint for Mimic Mode page"""
+    return Response(gen_mimic(global_camera),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
 
 
 
