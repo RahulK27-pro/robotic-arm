@@ -1,10 +1,10 @@
 import math
 
-# Link lengths in cm (Mock values - UPDATE THESE after measuring)
-LINK_1 = 10.0  # Base to Shoulder
-LINK_2 = 15.0  # Shoulder to Elbow
-LINK_3 = 15.0  # Elbow to Wrist
-LINK_4 = 5.0   # Wrist to Gripper
+# Link lengths in cm (Updated to match visual_ik_solver user-confirmed values)
+LINK_1 = 10.0  # Base to Shoulder (approx 10cm pedestal)
+LINK_2 = 15.0  # Shoulder to Elbow (L1 in visual_ik)
+LINK_3 = 13.0  # Elbow to Wrist (L2 in visual_ik)
+LINK_4 = 12.0  # Wrist to Gripper TIP (Gripper Length in visual_ik)
 
 def normalize_angle(angle):
     """

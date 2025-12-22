@@ -84,9 +84,10 @@ class MimicController:
             )
             print("--- MIMIC MODE STARTED (Visual Servoing) ---", flush=True)
             
-            # Move to starting position (similar to visual servoing)
+            # Move to starting position (mid-range reach)
             print("[MIMIC] Moving to starting position...", flush=True)
-            STARTING_ANGLES = [90, 120, 130, 90, 12, 170]  # Base, Shoulder, Elbow, Wrist_Pitch, Wrist_Roll, Gripper
+            # Mid-range: shoulder ~80°, elbow ~75° (between min and max reach)
+            STARTING_ANGLES = [90, 80, 75, 90, 12, 170]  # Base, Shoulder, Elbow, Wrist_Pitch, Wrist_Roll, Gripper
             self.robot.move_to(STARTING_ANGLES)
             time.sleep(1.0)
             print("[MIMIC] Ready to track!", flush=True)
@@ -162,9 +163,9 @@ class MimicController:
                     else:
                         distance_cm = 999
                     
-                    # Map to reach (REVERSED: closer = less reach, farther = more reach)
-                    reach_cm = np.interp(distance_cm, [20, 60], [10, 30])
-                    s_reach = self.smooth_depth.update(reach_cm)
+                    # Use actual distance for reach (no normalization)
+                    # This allows full 15-45cm range to be displayed and used
+                    s_reach = self.smooth_depth.update(distance_cm)
                     
                     # === GRIPPER (Thumb-Index Pinch) ===
                     thumb_x = hand_lm.landmark[4].x * w
@@ -189,8 +190,8 @@ class MimicController:
                     # Control Constants (tuned for smooth hand tracking)
                     GAIN_X = 0.005     # Base rotation gain (reduced for stability)
                     GAIN_Y = 0.005     # Elbow tilt gain (reduced for stability)
-                    MAX_STEP = 2.0     # Max angle change per frame
-                    MIN_MOVE = 1.0     # Minimum movement threshold (increased to reduce jitter)
+                    MAX_STEP = 1.0     # Max angle change per frame (limit to 1 deg)
+                    MIN_MOVE = 0.2     # Minimum movement threshold (allow fine control)
                     
                     # Fixed servos for mimic mode
                     WRIST_PITCH = 90
@@ -199,8 +200,6 @@ class MimicController:
                     # Get current angles
                     current_angles = self.robot.current_angles
                     current_base = current_angles[0]
-                    current_shoulder = current_angles[1]
-                    current_elbow = current_angles[2]
                     
                     # Calculate Base correction (X-axis centering)
                     base_correction = s_error_x * GAIN_X
@@ -209,16 +208,20 @@ class MimicController:
                     base_correction = max(-MAX_STEP, min(MAX_STEP, base_correction))
                     new_base = max(0, min(180, current_base + base_correction))
                     
-                    # Calculate Elbow correction (Y-axis centering)
+                    # Map reach to shoulder and elbow (FULL RANGE)
+                    # Close palm (20cm) -> shoulder=155°, elbow=150° (minimum reach)
+                    # Far palm (65cm) -> shoulder=0°, elbow=0° (maximum reach)
+                    base_shoulder = np.interp(s_reach, [20, 65], [155, 0])
+                    base_elbow = np.interp(s_reach, [20, 65], [150, 0])
+                    
+                    # Apply Y-axis centering correction on top of reach-based elbow
                     elbow_correction = -(s_error_y * GAIN_Y)  # Negative because up = lower angle
                     if abs(elbow_correction) < MIN_MOVE and abs(elbow_correction) > 0.1:
                         elbow_correction = MIN_MOVE * (1 if elbow_correction > 0 else -1)
                     elbow_correction = max(-MAX_STEP, min(MAX_STEP, elbow_correction))
-                    new_elbow = max(90, min(150, current_elbow + elbow_correction))
                     
-                    # Map reach to shoulder angle (closer = higher angle)
-                    # reach range: 10-30cm -> shoulder range: 110-140 degrees
-                    new_shoulder = np.interp(s_reach, [10, 30], [140, 110])
+                    new_shoulder = max(0, min(180, base_shoulder))
+                    new_elbow = max(0, min(150, base_elbow + elbow_correction))
                     
                     # Send to robot
                     try:

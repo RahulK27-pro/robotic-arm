@@ -44,9 +44,12 @@ def check_reachability(object_distance_cm, object_height_cm=5.0):
             print(f"Cannot reach: {reason}")
     """
     # Calculate where the wrist needs to be
-    # Wrist Target = Object Distance (from gripper) - Safety Offset
-    # Note: Input object_distance_cm is now assumed to be relative to the gripper
-    wrist_target_distance = object_distance_cm - SAFETY_OFFSET
+    # Wrist Target = Object Distance (from shoulder) - Gripper Length - Safety Offset
+    # We want the gripper tip to stop `safety_offset` before the object (or at the object if offset is 0)
+    # But usually visual servoing stops at BLIND_ZONE, then blindly grabs.
+    # Here, we calculate where the WRIST should be for the gripper TIP to be at `object_distance_cm`.
+    # Assuming gripper is roughly horizontal or inline for reach check:
+    wrist_target_distance = object_distance_cm - GRIPPER_LENGTH - SAFETY_OFFSET
     
     # Check if too close (inside the gripper length)
     if wrist_target_distance < 5.0:

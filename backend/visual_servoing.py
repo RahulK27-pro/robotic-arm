@@ -2,7 +2,7 @@ import time
 import threading
 from hardware.robot_driver import RobotArm
 from camera import VideoCamera
-from brain.kinematics import compute_forward_kinematics
+from brain.kinematics import compute_forward_kinematics, LINK_1
 import math
 
 class VisualServoingAgent:
@@ -340,7 +340,13 @@ class VisualServoingAgent:
             next_reach = curr_reach + step
             
             # 2. Solve IK for next reach
-            angles = get_wrist_angles(next_reach, object_height_cm=5.0)
+            # FIX: Convert absolute object height to relative height from shoulder pivot
+            # Default object height on table = 2.0cm. Base height = LINK_1.
+            # Relative = 2.0 - LINK_1
+            abs_height = 2.0 
+            rel_height = abs_height - LINK_1
+            
+            angles = get_wrist_angles(next_reach, object_height_cm=rel_height)
             if angles is None:
                 # Fallback: If we are close (gap < 10), try to just reach max and grab?
                 # For now, just stop to prevent crash
@@ -387,7 +393,7 @@ class VisualServoingAgent:
         final_reach = curr_reach + last_target_dist + 1.5 
         print(f"Pushing blindly to final reach: {final_reach:.1f}cm (Current: {curr_reach:.1f}cm + Gap: {last_target_dist:.1f}cm + 1.5cm)")
         
-        final_angles = get_wrist_angles(final_reach, object_height_cm=5.0)
+        final_angles = get_wrist_angles(final_reach, object_height_cm=rel_height)
         if final_angles:
              s, e = final_angles
              e = min(150, e)
