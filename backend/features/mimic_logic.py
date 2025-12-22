@@ -10,7 +10,7 @@ import threading
 REAL_PALM_WIDTH = 8.5   # cm (Average palm width)
 FOCAL_LENGTH = 1424     # From calibration
 CENTER_TOLERANCE = 50   # Pixels within which palm is "centered"
-SMOOTHING_ALPHA = 0.15  # 0.15 = Smooth/Heavy, 0.5 = Fast/Jittery
+SMOOTHING_ALPHA = 0.10  # 0.10 = Very Smooth/Heavy, 0.15 = Smooth, 0.5 = Fast/Jittery
 
 class SmoothFilter:
     def __init__(self, alpha=0.15):
@@ -83,6 +83,14 @@ class MimicController:
                 max_num_hands=1
             )
             print("--- MIMIC MODE STARTED (Visual Servoing) ---", flush=True)
+            
+            # Move to starting position (similar to visual servoing)
+            print("[MIMIC] Moving to starting position...", flush=True)
+            STARTING_ANGLES = [90, 120, 130, 90, 12, 170]  # Base, Shoulder, Elbow, Wrist_Pitch, Wrist_Roll, Gripper
+            self.robot.move_to(STARTING_ANGLES)
+            time.sleep(1.0)
+            print("[MIMIC] Ready to track!", flush=True)
+            
         except Exception as e:
             print(f"[MIMIC ERROR] Failed to initialize: {e}", flush=True)
             import traceback
@@ -178,21 +186,53 @@ class MimicController:
                         }
                     
                     # === SEND COMMANDS TO ROBOT ===
-                    # Convert centering errors to robot movements
-                    # Note: This is simplified - actual implementation would use
-                    # visual servoing control or IK to move based on errors
+                    # Control Constants (tuned for smooth hand tracking)
+                    GAIN_X = 0.005     # Base rotation gain (reduced for stability)
+                    GAIN_Y = 0.005     # Elbow tilt gain (reduced for stability)
+                    MAX_STEP = 2.0     # Max angle change per frame
+                    MIN_MOVE = 1.0     # Minimum movement threshold (increased to reduce jitter)
+                    
+                    # Fixed servos for mimic mode
+                    WRIST_PITCH = 90
+                    WRIST_ROLL = 12
+                    
+                    # Get current angles
+                    current_angles = self.robot.current_angles
+                    current_base = current_angles[0]
+                    current_shoulder = current_angles[1]
+                    current_elbow = current_angles[2]
+                    
+                    # Calculate Base correction (X-axis centering)
+                    base_correction = s_error_x * GAIN_X
+                    if abs(base_correction) < MIN_MOVE and abs(base_correction) > 0.1:
+                        base_correction = MIN_MOVE * (1 if base_correction > 0 else -1)
+                    base_correction = max(-MAX_STEP, min(MAX_STEP, base_correction))
+                    new_base = max(0, min(180, current_base + base_correction))
+                    
+                    # Calculate Elbow correction (Y-axis centering)
+                    elbow_correction = -(s_error_y * GAIN_Y)  # Negative because up = lower angle
+                    if abs(elbow_correction) < MIN_MOVE and abs(elbow_correction) > 0.1:
+                        elbow_correction = MIN_MOVE * (1 if elbow_correction > 0 else -1)
+                    elbow_correction = max(-MAX_STEP, min(MAX_STEP, elbow_correction))
+                    new_elbow = max(90, min(150, current_elbow + elbow_correction))
+                    
+                    # Map reach to shoulder angle (closer = higher angle)
+                    # reach range: 10-30cm -> shoulder range: 110-140 degrees
+                    new_shoulder = np.interp(s_reach, [10, 30], [140, 110])
+                    
+                    # Send to robot
                     try:
-                        # For now, we just print the commands
-                        # In full implementation, this would control the robot
-                        # based on error_x, error_y, and reach
+                        self.robot.move_to([new_base, new_shoulder, new_elbow, WRIST_PITCH, WRIST_ROLL, gripper])
                         
                         if not is_centered:
-                            print(f"\r[MIMIC] Centering: X={s_error_x:.1f}px Y={s_error_y:.1f}px | Reach={s_reach:.1f}cm | Gripper={gripper_state}    ", end="", flush=True)
+                            print(f"\r[MIMIC] Tracking: X={s_error_x:+.0f}px Y={s_error_y:+.0f}px | Base={new_base:.0f}° Elbow={new_elbow:.0f}° | Reach={s_reach:.1f}cm | {gripper_state}    ", end="", flush=True)
                         else:
-                            print(f"\r[MIMIC] ✓ CENTERED | Reach={s_reach:.1f}cm | Gripper={gripper_state}                           ", end="", flush=True)
+                            print(f"\r[MIMIC] ✓ CENTERED | Base={new_base:.0f}° Shoulder={new_shoulder:.0f}° Elbow={new_elbow:.0f}° | Reach={s_reach:.1f}cm | {gripper_state}    ", end="", flush=True)
                             
                     except Exception as e:
-                        pass
+                        print(f"\n[MIMIC ERROR] Failed to move robot: {e}", flush=True)
+                        import traceback
+                        traceback.print_exc()
             
             time.sleep(0.03)
 
