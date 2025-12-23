@@ -5,6 +5,7 @@ Handles object detection using YOLOv8 model
 
 import cv2
 import numpy as np
+import os
 from ultralytics import YOLO
 from coordinate_mapper import CoordinateMapper
 
@@ -18,6 +19,13 @@ class YOLODetector:
             model_name: YOLO model to use (default: yolov8n.pt - nano/fastest)
             confidence_threshold: Minimum confidence score for detections (0.0-1.0)
         """
+        # Resolve absolute path for model if it's a local file
+        if not os.path.isabs(model_name):
+            local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), model_name)
+            if os.path.exists(local_path):
+                print(f"[YOLO] Found local model file: {local_path}")
+                model_name = local_path
+        
         print(f"[YOLO] Loading model: {model_name}")
         self.model = YOLO(model_name)
         self.confidence_threshold = confidence_threshold

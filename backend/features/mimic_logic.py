@@ -5,6 +5,9 @@ import math
 import numpy as np
 import time
 import threading
+import torch
+import os
+from brain.anfis_pytorch import ANFIS
 
 # --- CONFIGURATION ---
 REAL_PALM_WIDTH = 8.5   # cm (Average palm width)
@@ -55,6 +58,33 @@ class MimicController:
         self.mp_hands = None
         self.mp_drawing = None
         self.mp_drawing_styles = None
+        
+        # --- ANFIS BRAIN INIT ---
+        print("[MIMIC] Loading ANFIS Brain...")
+        ranges = [(-600, 600), (0, 120)]
+        self.model = ANFIS(n_inputs=2, n_rules=8, input_ranges=ranges)
+        self.use_anfis = False
+        
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        model_path = os.path.join(base_dir, '../brain/anfis_model.pth')
+        
+        try:
+            if os.path.exists(model_path):
+                self.model.load_state_dict(torch.load(model_path))
+                self.model.eval()
+                self.use_anfis = True
+                print(f"[MIMIC] ANFIS Brain Loaded! 🧠")
+            else:
+                print(f"[MIMIC] ⚠️ ANFIS model not found. Using Legacy P-Control.")
+        except Exception as e:
+            print(f"[MIMIC] Error loading brain: {e}")
+
+    def predict_correction(self, error, distance):
+        """Neural inference for correction angle"""
+        if not self.use_anfis: return 0.0
+        with torch.no_grad():
+            inputs = torch.tensor([[error, distance]], dtype=torch.float32)
+            return self.model(inputs).item()
         
     def get_hand_landmarks(self):
         """Thread-safe getter for hand landmarks to draw on video feed"""
@@ -202,10 +232,20 @@ class MimicController:
                     current_base = current_angles[0]
                     
                     # Calculate Base correction (X-axis centering)
-                    base_correction = s_error_x * GAIN_X
-                    if abs(base_correction) < MIN_MOVE and abs(base_correction) > 0.1:
-                        base_correction = MIN_MOVE * (1 if base_correction > 0 else -1)
-                    base_correction = max(-MAX_STEP, min(MAX_STEP, base_correction))
+                    # Calculate Base correction (X-axis centering)
+                    # HYBRID CONTROL: Use ANFIS if available, else P-Control
+                    if self.use_anfis:
+                         # Neural Network Control
+                         base_correction = self.predict_correction(s_error_x, s_reach)
+                         # Note: ANFIS output is already clamped/scaled by training data (-1 to 1 mostly)
+                         # But let's respect the MAX_STEP speed limit
+                         base_correction = max(-MAX_STEP, min(MAX_STEP, base_correction))
+                    else:
+                        # Legacy P-Control
+                        base_correction = s_error_x * GAIN_X
+                        if abs(base_correction) < MIN_MOVE and abs(base_correction) > 0.1:
+                            base_correction = MIN_MOVE * (1 if base_correction > 0 else -1)
+                        base_correction = max(-MAX_STEP, min(MAX_STEP, base_correction))
                     new_base = max(0, min(180, current_base + base_correction))
                     
                     # Map reach to shoulder and elbow (FULL RANGE)

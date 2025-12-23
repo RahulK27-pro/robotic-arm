@@ -4,6 +4,10 @@ from hardware.robot_driver import RobotArm
 from camera import VideoCamera
 from brain.kinematics import compute_forward_kinematics, LINK_1
 import math
+import torch
+import os
+from brain.anfis_pytorch import ANFIS
+from tools.collect_data import DataCollector
 
 class VisualServoingAgent:
     """
@@ -27,6 +31,45 @@ class VisualServoingAgent:
         self.centered_frames = 0  # Count consecutive centered frames
         self.required_centered_frames = 5  # Frames needed before approach
         self.grab_distance = 2.0  # cm - close gripper when this close
+        
+        # Load the Trained ANFIS Model
+        print("[ANFIS] Loading neural brain...")
+        # IMPORTANT: Must use same ranges as training!
+        ranges = [(-600, 600), (0, 120)]
+        self.model = ANFIS(n_inputs=2, n_rules=8, input_ranges=ranges)
+        self.use_anfis = False
+        
+        # Robust path finding
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        model_path = os.path.join(base_dir, 'brain/anfis_model.pth')
+        
+        try:
+            if os.path.exists(model_path):
+                self.model.load_state_dict(torch.load(model_path))
+                self.model.eval() # Set to inference mode
+                self.use_anfis = True
+                print(f"[ANFIS] Model loaded successfully from {model_path}")
+            else:
+                print(f"[ANFIS] Warning: Model not found at {model_path}. Run train_anfis.py first.")
+        except Exception as e:
+            print(f"[ANFIS] Error loading model: {e}")
+            
+        # Data Collection (Bootstrapping Mode)
+        # If ANFIS is NOT active, we collect data from the P-controller to train it.
+        self.collector = DataCollector()
+        self.collect_data = not self.use_anfis 
+        if self.collect_data:
+            print("[ANFIS] 📝 Data Collection ENABLED (Recording P-Control moves)")
+
+    def predict_correction(self, error, distance):
+        """Inference step: (Error, Dist) -> Correction Angle"""
+        if not self.use_anfis:
+            return 0.0
+            
+        with torch.no_grad():
+            inputs = torch.tensor([[error, distance]], dtype=torch.float32)
+            correction = self.model(inputs)
+            return correction.item()
         
     def start(self, target_object_name):
         """Start servoing loop."""
@@ -202,29 +245,53 @@ class VisualServoingAgent:
             # Corrections
             # Priority: X then Y
             if not x_centered:
-                # ADAPTIVE GAIN
-                current_gain = GAIN_HIGH if abs(error_x) > 100 else GAIN_LOW
-                
-                raw_correction = (error_x * current_gain)
-                
-                # MIN-MOVE THRESHOLD (Anti-Stiction)
-                if abs(raw_correction) < 0.5:
-                    correction_x = 0 # Ignore micro-jitters
-                elif abs(raw_correction) < MIN_MOVE:
-                    # Force minimum move if significant enough
-                    correction_x = MIN_MOVE * (1 if raw_correction > 0 else -1)
+                if self.use_anfis:
+                    # --- ANFIS CONTROL (X-Axis) ---
+                    dist_cm = detections[0].get('distance_cm', 20.0)
+                    if dist_cm <= 0: dist_cm = 20.0 # Safety default
+                    
+                    correction_x = self.predict_correction(error_x, dist_cm)
+                    
+                    # Apply to Robot
+                    new_base = current_base + correction_x
+                    new_base = max(SERVO_MIN, min(SERVO_MAX, new_base))
+                    
+                    new_elbow = current_elbow
+                    
+                    dir_x = "RIGHT" if correction_x > 0 else "LEFT"
+                    print(f"[Frame {self.frame_count}] X-ANFIS (Dist={dist_cm:.1f}cm): {error_x:+4.0f}px → {dir_x} {abs(correction_x):.2f}°")
+                    
                 else:
-                    correction_x = raw_correction
-                
-                correction_x = max(-MAX_STEP, min(MAX_STEP, correction_x))
-                
-                new_base = current_base + correction_x
-                new_base = max(SERVO_MIN, min(SERVO_MAX, new_base))
-                
-                new_elbow = current_elbow
-                
-                dir_x = "RIGHT" if correction_x > 0 else "LEFT"
-                print(f"[Frame {self.frame_count}] X-ALIGN (G={current_gain}): {error_x:+4.0f}px → {dir_x} {abs(correction_x):.2f}°")
+                    # --- LEGACY P-CONTROL (Fallback) ---
+                    # ADAPTIVE GAIN
+                    current_gain = GAIN_HIGH if abs(error_x) > 100 else GAIN_LOW
+                    
+                    raw_correction = (error_x * current_gain)
+                    
+                    # MIN-MOVE THRESHOLD (Anti-Stiction)
+                    if abs(raw_correction) < 0.5:
+                        correction_x = 0 # Ignore micro-jitters
+                    elif abs(raw_correction) < MIN_MOVE:
+                        # Force minimum move if significant enough
+                        correction_x = MIN_MOVE * (1 if raw_correction > 0 else -1)
+                    else:
+                        correction_x = raw_correction
+                    
+                    correction_x = max(-MAX_STEP, min(MAX_STEP, correction_x))
+                    
+                    new_base = current_base + correction_x
+                    new_base = max(SERVO_MIN, min(SERVO_MAX, new_base))
+                    
+                    new_elbow = current_elbow
+                    
+                    dir_x = "RIGHT" if correction_x > 0 else "LEFT"
+                    print(f"[Frame {self.frame_count}] X-ALIGN (G={current_gain}): {error_x:+4.0f}px → {dir_x} {abs(correction_x):.2f}°")
+                    
+                    # LOG DATA for ANFIS Training
+                    if self.collect_data and abs(correction_x) > 0:
+                        dist_cm = detections[0].get('distance_cm', 20.0)
+                        if dist_cm <= 0: dist_cm = 20.0
+                        self.collector.log(error_x, dist_cm, correction_x)
                 
             else: # X is good, fix Y
                 # ADAPTIVE GAIN
@@ -254,8 +321,12 @@ class VisualServoingAgent:
             self.robot.move_to([new_base, SHOULDER, new_elbow, WRIST_PITCH, WRIST_ROLL, GRIPPER])
             
             current_base = new_base
+            current_base = new_base
             current_elbow = new_elbow
-            time.sleep(0.05)
+            
+            # STABILIZATION DELAY (Stop-and-Stare)
+            # Wait for robot to settle and camera to capture a clean frame
+            time.sleep(0.5)
     
     def _approach_and_grab(self, base, shoulder, elbow, wrist_pitch, wrist_roll):
         """
@@ -376,7 +447,9 @@ class VisualServoingAgent:
             
             current_base = new_base
             iteration += 1
-            time.sleep(0.1) # Stabilization delay
+            current_base = new_base
+            iteration += 1
+            time.sleep(0.4) # Stabilization delay (Stalking)
             
             
         # --- STAGE 3: BLIND COMMIT ---
