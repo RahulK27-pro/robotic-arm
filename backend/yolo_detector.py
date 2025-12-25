@@ -11,12 +11,12 @@ from coordinate_mapper import CoordinateMapper
 
 
 class YOLODetector:
-    def __init__(self, model_name='yolov8n.pt', confidence_threshold=0.5):
+    def __init__(self, model_name='yolov8s-worldv2.pt', confidence_threshold=0.5):
         """
         Initialize YOLO detector.
         
         Args:
-            model_name: YOLO model to use (default: yolov8n.pt - nano/fastest)
+            model_name: YOLO model to use (default: yolov8s-worldv2.pt - open vocabulary)
             confidence_threshold: Minimum confidence score for detections (0.0-1.0)
         """
         # Resolve absolute path for model if it's a local file
@@ -31,6 +31,21 @@ class YOLODetector:
         self.confidence_threshold = confidence_threshold
         self.mapper = None
         print(f"[YOLO] Model loaded successfully! Confidence threshold: {confidence_threshold}")
+
+    def set_classes(self, classes):
+        """
+        Set specific classes for the model to detect (Open Vocabulary).
+        
+        Args:
+            classes: List of strings (e.g., ["red cube", "bottle"]) or None to reset.
+        """
+        if classes:
+            print(f"[YOLO-World] Setting focus classes: {classes}")
+            self.model.set_classes(classes)
+        else:
+            print("[YOLO-World] Resetting classes (detecting everything in model vocabulary)")
+            self.model.set_classes(None) # Reset to default
+
     
     def detect_objects(self, frame):
         """
@@ -53,14 +68,19 @@ class YOLODetector:
         if self.mapper is None:
             self.mapper = CoordinateMapper(width, height)
         
-        # Run YOLO inference
-        results = self.model(frame, conf=self.confidence_threshold, verbose=False)
+        # Run YOLO inference (Lower confidence for YOLO-World)
+        results = self.model(frame, conf=0.10, verbose=False)
         
         detections = []
         
         # Process each detection
         for result in results:
             boxes = result.boxes
+            # Only print if detection count changed (reduce spam)
+            if not hasattr(self, '_last_box_count') or self._last_box_count != len(boxes):
+                print(f"[YOLO-DEBUG] Found {len(boxes)} raw detections")
+                self._last_box_count = len(boxes)
+            
             for box in boxes:
                 # Get bounding box coordinates
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
@@ -73,6 +93,10 @@ class YOLODetector:
                 class_id = int(box.cls[0])
                 confidence = float(box.conf[0])
                 object_name = self.model.names[class_id]
+                
+                # Only print first detection (reduce spam)
+                if len(detections) == 0:
+                    print(f"[YOLO-DEBUG] Detected: {object_name} (conf={confidence:.2f})")
                 
                 # Convert to real-world coordinates (cm)
                 cm_x, cm_y = self.mapper.pixel_to_cm(cx, cy)

@@ -185,7 +185,7 @@ class VisualServoingAgent:
                         self.state = "SEARCHING"
                 
                 # Perform Sweep
-                step = 3.0 
+                step = 3.0 # Increased speed (User Request)
                 new_base = current_base + (self.search_dir * step)
                 
                 if new_base <= SERVO_MIN:

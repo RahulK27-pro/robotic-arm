@@ -24,6 +24,13 @@ class VideoCamera(object):
             center_tolerance: Pixel tolerance for "centered" alignment (default: 25)
             focal_length_override: Override focal length (pixels) for calibration (default: None uses 1424)
         """
+        # Default objects to detect (General Workplace Items)
+        self.DEFAULT_CLASSES = [
+            "person", "bottle", "cup", "cell phone", "mouse", "keyboard", 
+            "laptop", "scissors", "stapler", "pen", "glasses", "sunglasses",
+             "red cube", "blue cube", "green cube", "yellow cube"
+        ]
+        
         # Try to find a working camera index
         target_index = int(os.environ.get("CAMERA_INDEX", 1))
         
@@ -89,6 +96,9 @@ class VideoCamera(object):
         self.yolo_detector = None
         if detection_mode == 'yolo':
             self.yolo_detector = YOLODetector(confidence_threshold=0.25)
+            # Set default classes for YOLO-World
+            if hasattr(self.yolo_detector, 'set_classes'):
+                self.yolo_detector.set_classes(self.DEFAULT_CLASSES)
         
         # Center-seeking state
         self.target_object = None  # Target object name for filtering (e.g., "bottle")
@@ -131,69 +141,195 @@ class VideoCamera(object):
         self.stopped = False
         self.pause_yolo = False  # Flag to pause YOLO processing
         
+        # Frame containers for async inference
+        self.latest_frame_for_inference = None
+        self.inference_lock = threading.Lock()
+        
         # Start background capture thread
         print("[INFO] Starting background capture thread...")
         self.thread = threading.Thread(target=self._capture_loop, daemon=True)
         self.thread.start()
+
+        # Start background INFERENCE thread (Decoupled to prevent video freeze)
+        print("[INFO] Starting background inference thread...")
+        self.inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
+        self.inference_thread.start()
+
+    def _inference_loop(self):
+        """
+        Dedicated thread for YOLO inference.
+        Runs as fast as possible but doesn't block the video feed.
+        """
+        print("[INFO] Inference thread started.")
+        inference_counter = 0
+        while not self.stopped:
+            try:
+                # Check if paused (e.g. mimic mode)
+                if self.pause_yolo:
+                    time.sleep(0.1)
+                    continue
+
+                # Get latest available frame
+                frame_to_process = None
+                with self.inference_lock:
+                    if self.latest_frame_for_inference is not None:
+                         frame_to_process = self.latest_frame_for_inference.copy()
+                
+                if frame_to_process is None:
+                    time.sleep(0.01)
+                    continue
+                
+                # Heartbeat every 50 frames
+                inference_counter += 1
+                if inference_counter % 50 == 0:
+                    print(f"[INFERENCE-HEARTBEAT] Running... (frame {inference_counter})")
+                
+                # Run Inference logic
+                if self.detection_mode == 'yolo':
+                        self.find_objects_yolo(frame_to_process) # Updates self.last_detection internal state
+                elif self.target_colors:
+                        self.find_objects(frame_to_process) # Updates self.last_detection internal state
+                
+                # Yield to CPU
+                time.sleep(0.01)
+
+            except Exception as e:
+                print(f"[ERROR] CRITICAL INFERENCE LOOP ERROR: {e}")
+                import traceback
+                traceback.print_exc()
+                time.sleep(1) # Prevent spamming on repeated error
 
     def _capture_loop(self):
         """
         Background thread to continuously read and process frames.
         Ensures thread-safety and consistent FPS for all consumers.
         """
+        print("[INFO] Capture thread started.")
         while not self.stopped:
-            if not self.video.isOpened():
-                time.sleep(0.5)
-                continue
+            try:
+                if not self.video.isOpened():
+                    print("[WARN] Camera not opened, retrying...")
+                    time.sleep(0.5)
+                    continue
+                    
+                success, image = self.video.read()
+                if not success:
+                    print("[WARN] Failed to read frame from camera.")
+                    time.sleep(0.01)
+                    continue
+                    
+                # Store raw frame
+                self.raw_frame = image.copy()
                 
-            success, image = self.video.read()
-            if not success:
-                time.sleep(0.01)
-                continue
+                # Update frame for inference thread
+                with self.inference_lock:
+                    self.latest_frame_for_inference = image.copy()
                 
-            # Store raw frame
-            self.raw_frame = image.copy()
-            
-            # Skip YOLO processing if paused (e.g., during mimic mode)
-            if self.pause_yolo:
-                # Just show raw frame with "YOLO PAUSED" text
+                # Skip YOLO processing if paused (e.g., during mimic mode)
+                if self.pause_yolo:
+                    # Just show raw frame with "YOLO PAUSED" text
+                    display_frame = image.copy()
+                    cv2.putText(display_frame, "YOLO PAUSED", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    ret, jpeg = cv2.imencode('.jpg', display_frame)
+                    if ret:
+                        self.processed_jpeg = jpeg.tobytes()
+                    time.sleep(0.01)
+                    continue
+                
+                # Prepare display frame
                 display_frame = image.copy()
-                cv2.putText(display_frame, "YOLO PAUSED", (10, 30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                height, width, _ = display_frame.shape
+                cx, cy = width // 2, height // 2
+                
+                # Simple visual guides (always present)
+                cv2.line(display_frame, (cx - 20, cy), (cx + 20, cy), (200, 200, 200), 1)
+                cv2.line(display_frame, (cx, cy - 20), (cx, cy + 20), (200, 200, 200), 1)
+                
+                # DRAW LATEST DETECTIONS (Non-blocking)
+                # Use self.last_detection which is updated by the inference thread
+                if self.detection_mode == 'yolo' and self.yolo_detector:
+                    cv2.putText(display_frame, "Mode: YOLO-World", (10, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    
+                    if self.last_detection:
+                        self.yolo_detector.draw_detections(display_frame, self.last_detection)
+                        
+                    # Add Center-seeking visuals
+                    if self.target_object and self.last_detection:
+                        self._draw_overlay(display_frame)
+
+                elif self.target_colors:
+                    cv2.putText(display_frame, "Mode: Color", (10, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                    if self.last_detection:
+                        for det in self.last_detection:
+                            if 'cm_x' in det: 
+                                obj_x = int(cx + det['x'])
+                                obj_y = int(cy - det['y']) 
+                                
+                                cv2.circle(display_frame, (obj_x, obj_y), 30, (0, 255, 0), 2)
+                                cv2.putText(display_frame, det.get('color', 'Target'), (obj_x, obj_y - 40), 
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
+
+                else:
+                    cv2.putText(display_frame, "Mode: Idle", (10, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                
+                # Encode result to JPEG
                 ret, jpeg = cv2.imencode('.jpg', display_frame)
                 if ret:
                     self.processed_jpeg = jpeg.tobytes()
+                    
+                # Small yield to prevent CPU hogging if capture is uncapped
                 time.sleep(0.01)
-                continue
+
+            except Exception as e:
+                print(f"[ERROR] CRITICAL CAPTURE LOOP ERROR: {e}")
+                import traceback
+                traceback.print_exc()
+                time.sleep(1)
+
+    def _draw_overlay(self, frame):
+        """Helper to draw overlay graphics on the display frame"""
+        height, width, _ = frame.shape
+        frame_center_x = width // 2
+        frame_center_y = height // 2
+        
+        if self.last_detection:
+            det = self.last_detection[0]
             
-            # Process frame based on current detection mode
-            # This is the ONLY place where camera processing happens
-            height, width, _ = image.shape
-            cx, cy = width // 2, height // 2
+            # Draw frame center crosshair (larger)
+            cv2.line(frame, (frame_center_x - 30, frame_center_y), 
+                        (frame_center_x + 30, frame_center_y), (0, 255, 255), 2)
+            cv2.line(frame, (frame_center_x, frame_center_y - 30), 
+                        (frame_center_x, frame_center_y + 30), (0, 255, 255), 2)
+            cv2.circle(frame, (frame_center_x, frame_center_y), 
+                        self.center_tolerance, (0, 255, 255), 2)
             
-            # Simple visual guides (always present)
-            cv2.line(image, (cx - 20, cy), (cx + 20, cy), (200, 200, 200), 1)
-            cv2.line(image, (cx, cy - 20), (cx, cy + 20), (200, 200, 200), 1)
+            # Navigation text
+            abs_error_x = abs(det['error_x'])
+            abs_error_y = abs(det['error_y'])
             
-            if self.detection_mode == 'yolo':
-                image = self.find_objects_yolo(image)
-                cv2.putText(image, "Mode: YOLO", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            elif self.target_colors:
-                image = self.find_objects(image)
-                cv2.putText(image, "Mode: Color", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            direction_x_text = "RIGHT" if det['error_x'] > 0 else "LEFT"
+            direction_y_text = "DOWN" if det['error_y'] > 0 else "UP"
+
+            if det['is_centered']:
+                status_color = (0, 255, 0)
+                status_text = "✓ CENTERED"
+                cv2.putText(frame, status_text, (50, height - 60),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
             else:
-                cv2.putText(image, "Mode: Idle", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            
-            # Encode result to JPEG
-            ret, jpeg = cv2.imencode('.jpg', image)
-            if ret:
-                self.processed_jpeg = jpeg.tobytes()
-                
-            # Small yield to prevent CPU hogging if capture is uncapped
-            time.sleep(0.01)
+                status_color = (0, 165, 255)
+                nav_line1 = f"Move {abs_error_x}px {direction_x_text}"
+                nav_line2 = f"Move {abs_error_y}px {direction_y_text}"
+                cv2.putText(frame, nav_line1, (50, height - 110),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
+                cv2.putText(frame, nav_line2, (50, height - 70),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
+
+            cv2.putText(frame, f"Target: {self.target_object}", (50, height - 150),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
     def __del__(self):
         self.stop()
@@ -219,6 +355,9 @@ class VideoCamera(object):
         # Initialize YOLO detector if switching to YOLO mode
         if mode == 'yolo' and self.yolo_detector is None:
             self.yolo_detector = YOLODetector(confidence_threshold=0.25)
+            # Apply default classes
+            if hasattr(self.yolo_detector, 'set_classes'):
+                self.yolo_detector.set_classes(self.DEFAULT_CLASSES)
         
         print(f"[INFO] Detection mode set to: {mode}")
     
@@ -232,7 +371,10 @@ class VideoCamera(object):
         """
         self.target_object = object_name.lower() if object_name else None
         self.last_detection = []  # Clear detections when target changes
-        print(f"[INFO] Target object set to: {self.target_object}")
+        
+        # NOTE: We do NOT call set_classes dynamically because it breaks detection
+        # Instead, we filter in software in find_objects_yolo
+        print(f"[INFO] Target object set to: {self.target_object} (filtering detections)")
     
     def clear_target_object(self):
         """
@@ -240,6 +382,8 @@ class VideoCamera(object):
         """
         self.target_object = None
         self.last_detection = []
+        
+        # NOTE: Not resetting classes - detection always runs with full class set
         print(f"[INFO] Target object cleared - showing all objects")
     
     def set_target_colors(self, color_names):
@@ -317,6 +461,7 @@ class VideoCamera(object):
                 'cm_x': det['cm_x'],          # Real-world x in cm
                 'cm_y': det['cm_y'],          # Real-world y in cm
                 'bbox': det['bbox'],          # Bounding box
+                'center': det['center'],      # Center point for drawing (REQUIRED)
                 # Center-seeking data
                 'error_x': error_x,           # Pixels from center (+ = left, - = right)
                 'error_y': error_y,           # Pixels from center (+ = above, - = below)
