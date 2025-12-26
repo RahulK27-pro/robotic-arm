@@ -296,6 +296,21 @@ class VideoCamera(object):
             
             direction_x_text = "RIGHT" if det['error_x'] > 0 else "LEFT"
             direction_y_text = "DOWN" if det['error_y'] > 0 else "UP"
+            
+            # Display X/Y Offsets and Distance in top-left area
+            cv2.putText(frame, f"X Offset: {abs_error_x}px", (30, 120), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(frame, f"Y Offset: {abs_error_y}px", (30, 150), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            
+            # Display distance (always shown, updates in real-time)
+            if det.get('distance_cm', -1) >= 0:
+                distance_color = (0, 255, 0) if det['is_centered'] else (0, 255, 255)
+                cv2.putText(frame, f"Distance: {det['distance_cm']:.1f} cm", (30, 180), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, distance_color, 2)
+            else:
+                cv2.putText(frame, "Distance: UNKNOWN", (30, 180),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
 
             if det['is_centered']:
                 status_color = (0, 255, 0)
@@ -313,6 +328,7 @@ class VideoCamera(object):
 
             cv2.putText(frame, f"Target: {self.target_object}", (50, height - 150),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
 
     def __del__(self):
         self.stop()
@@ -482,7 +498,37 @@ class VideoCamera(object):
         # Draw detections on frame (only target object if filter is active)
         frame = self.yolo_detector.draw_detections(frame, detections)
         
-        # Add center-seeking visual guides
+        # Display distance and offsets for ALL detections (always visible)
+        if self.last_detection:
+            det = self.last_detection[0]  # Use first (closest) detection
+            
+            # Calculate pixel errors
+            abs_error_x = abs(det['error_x'])
+            abs_error_y = abs(det['error_y'])
+            
+            # Calculate CM error if mapper is available
+            cm_error_x = 0.0
+            cm_error_y = 0.0
+            if self.yolo_detector and self.yolo_detector.mapper:
+                cm_error_x = abs_error_x / self.yolo_detector.mapper.pixels_per_cm_x
+                cm_error_y = abs_error_y / self.yolo_detector.mapper.pixels_per_cm_y
+            
+            # Display X/Y Corrections and Distance in top-left area (near each other)
+            cv2.putText(frame, f"X Offset: {abs_error_x}px ({cm_error_x:.1f} cm)", (30, 120), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(frame, f"Y Offset: {abs_error_y}px ({cm_error_y:.1f} cm)", (30, 150), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            
+            # Display distance (always shown, updates in real-time)
+            if det['distance_cm'] >= 0:
+                distance_color = (0, 255, 0) if det['is_centered'] else (0, 255, 255)
+                cv2.putText(frame, f"Distance: {det['distance_cm']:.1f} cm", (30, 180), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, distance_color, 2)
+            else:
+                cv2.putText(frame, "Distance: UNKNOWN", (30, 180),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
+        
+        # Add center-seeking visual guides (only when target object is set)
         if self.target_object and self.last_detection:
             det = self.last_detection[0]  # Use first (closest) detection
             
@@ -494,28 +540,14 @@ class VideoCamera(object):
             cv2.circle(frame, (frame_center_x, frame_center_y), 
                       self.center_tolerance, (0, 255, 255), 2)
             
-            # Build navigation message
-            abs_error_x = abs(det['error_x'])
-            abs_error_y = abs(det['error_y'])
-            
-            # Calculate CM error if mapper is available
-            cm_error_x = 0.0
-            cm_error_y = 0.0
-            if self.yolo_detector and self.yolo_detector.mapper:
-                cm_error_x = abs_error_x / self.yolo_detector.mapper.pixels_per_cm_x
-                cm_error_y = abs_error_y / self.yolo_detector.mapper.pixels_per_cm_y
-            
-            # Display CM error in top-left area (moved down to avoid CAM-01 badge)
-            cv2.putText(frame, f"X Correction: {cm_error_x:.1f} cm", (30, 120), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            cv2.putText(frame, f"Y Correction: {cm_error_y:.1f} cm", (30, 150), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
             # Determine directions (from robot/camera perspective)
             # error_x > 0: object is left of center → move RIGHT
             # error_x < 0: object is right of center → move LEFT
             direction_x_text = "RIGHT" if det['error_x'] > 0 else "LEFT"
             direction_y_text = "DOWN" if det['error_y'] > 0 else "UP"
+            
+            abs_error_x = abs(det['error_x'])
+            abs_error_y = abs(det['error_y'])
             
             # Draw alignment status
             if det['is_centered']:
@@ -538,15 +570,6 @@ class VideoCamera(object):
             # Show target object name at top of bottom section
             cv2.putText(frame, f"Target: {self.target_object}", (50, height - 150),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-            
-            # Display distance estimation
-            if det['distance_cm'] >= 0:
-                distance_color = (0, 255, 0) if det['is_centered'] else (0, 165, 255)
-                cv2.putText(frame, f"Gripper Dist: {det['distance_cm']:.1f} cm", (50, height - 190),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, distance_color, 2)
-            else:
-                cv2.putText(frame, "Distance: UNKNOWN", (50, height - 190),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (128, 128, 128), 2)
         
         # Print detection status
         if self.last_detection:
