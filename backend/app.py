@@ -157,14 +157,20 @@ def set_target_color():
 
 @app.route('/get_detection_result', methods=['GET'])
 def get_detection_result():
-    if global_camera.last_detection and len(global_camera.last_detection) > 0:
-        return jsonify({
-            "status": "found",
-            "data": global_camera.last_detection,
-            "count": len(global_camera.last_detection)
-        })
-    else:
-        return jsonify({"status": "searching"})
+    try:
+        if global_camera.last_detection and len(global_camera.last_detection) > 0:
+            return jsonify({
+                "status": "found",
+                "data": global_camera.last_detection,
+                "count": len(global_camera.last_detection)
+            })
+        else:
+            return jsonify({"status": "searching"})
+    except Exception as e:
+        print(f"[ERROR] /get_detection_result failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e), "status": "error"}), 500
 
 @app.route('/set_target_object', methods=['POST'])
 def set_target_object():

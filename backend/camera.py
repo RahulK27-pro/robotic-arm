@@ -41,50 +41,9 @@ class VideoCamera(object):
             ("DEFAULT", cv2.CAP_ANY)
         ]
         
-        self.video = cv2.VideoCapture()
-        opened = False
-        camera_index = -1
-        
-        # Try target index FIRST with all backends
-        print(f"[INFO] Targeting external camera index: {target_index}")
-        for b_name, b_val in backends:
-            print(f"[INFO] Trying camera {target_index} with {b_name}...")
-            self.video.open(target_index, b_val)
-            if self.video.isOpened():
-                print(f"[SUCCESS] Camera {target_index} opened with {b_name}!")
-                opened = True
-                camera_index = target_index
-                break
-        
-        # ONLY if target failed, try index 0 as fallback
-        if not opened and target_index != 0:
-            print(f"[WARN] Camera {target_index} failed. Falling back to index 0...")
-            for b_name, b_val in backends:
-                print(f"[INFO] Trying camera 0 with {b_name}...")
-                self.video.open(0, b_val)
-                if self.video.isOpened():
-                    print(f"[INFO] Camera 0 opened with {b_name}.")
-                    opened = True
-                    camera_index = 0
-                    break
-                
-        if not opened:
-            print(f"[ERROR] CRITICAL: Could not open ANY camera device (tried index {target_index} and 0).")
-            print("[TIP] Ensure your external webcam is plugged in and not in use by another app (Zoom, Teams, etc.)")
-        else:
-            # Force 720p resolution for accurate focal length calibration
-            self.video.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-            self.video.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        self.video = None
+        self._open_camera()
             
-            # Verify resolution was set
-            actual_width = int(self.video.get(cv2.CAP_PROP_FRAME_WIDTH))
-            actual_height = int(self.video.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            print(f"[INFO] Camera resolution set to: {actual_width}x{actual_height}")
-            
-            if actual_width != 1280 or actual_height != 720:
-                print(f"[WARN] Could not set 720p. Using {actual_width}x{actual_height}")
-            
-            print(f"[INFO] Camera {camera_index} is READY.")
         
         # Detection mode: 'yolo' or 'color'
         self.detection_mode = detection_mode
@@ -204,8 +163,26 @@ class VideoCamera(object):
         Background thread to continuously read and process frames.
         Ensures thread-safety and consistent FPS for all consumers.
         """
+        consecutive_failures = 0
+        self.last_frame_time = time.time()
+        
+        # Start Watchdog Timer
+        self.watchdog = threading.Thread(target=self._watchdog_loop, daemon=True)
+        self.watchdog.start()
+        
         print("[INFO] Capture thread started.")
         while not self.stopped:
+            # Update heartbeat
+            self.last_frame_time = time.time()
+            
+            # Check if camera needs opening
+            if self.video is None or not self.video.isOpened():
+                print("[CAMERA] Camera disconnected or released. Attempting to reconnect...")
+                if self._open_camera():
+                     consecutive_failures = 0
+                else:
+                     time.sleep(2.0) # Wait before retry
+                     continue
             try:
                 if not self.video.isOpened():
                     print("[WARN] Camera not opened, retrying...")
@@ -214,9 +191,15 @@ class VideoCamera(object):
                     
                 success, image = self.video.read()
                 if not success:
-                    print("[WARN] Failed to read frame from camera.")
+                    consecutive_failures += 1
+                    if consecutive_failures > 10:
+                        print("[CAMERA] Too many read errors. Re-initializing...")
+                        self.video.release() # Force close to trigger full reopen
+                        consecutive_failures = 0
                     time.sleep(0.01)
                     continue
+                
+                consecutive_failures = 0 # Reset on success
                     
                 # Store raw frame
                 self.raw_frame = image.copy()
@@ -333,6 +316,25 @@ class VideoCamera(object):
 
     def __del__(self):
         self.stop()
+
+    def _watchdog_loop(self):
+        """
+        Monitors the capture loop. If no new frames are processed for 5 seconds,
+        it assumes the camera driver is hung and forces a restart.
+        """
+        print("[WATCHDOG] Camera watchdog started.")
+        while not self.stopped:
+            time.sleep(2.0)
+            if time.time() - self.last_frame_time > 5.0 and self.video is not None:
+                print(f"[WATCHDOG] CRITICAL: Camera freeze detected! Last frame was {time.time() - self.last_frame_time:.1f}s ago.")
+                print("[WATCHDOG] Force-releasing camera to trigger restart...")
+                
+                # Force release the video object to break the blocking read() if possible
+                try:
+                     if self.video: self.video.release()
+                except:
+                     pass
+                self.video = None # This will trigger _capture_loop to reconnect
 
     def stop(self):
         """Stop the camera and capture thread."""
@@ -686,3 +688,34 @@ class VideoCamera(object):
         """
         return self.processed_jpeg
 
+
+    def _open_camera(self):
+        """Attempts to open the camera (Target Index -> Fallback 0)"""
+        if self.video and self.video.isOpened():
+             self.video.release()
+             
+        self.video = cv2.VideoCapture()
+        backends = [("DSHOW", cv2.CAP_DSHOW), ("MSMF", cv2.CAP_MSMF), ("DEFAULT", cv2.CAP_ANY)]
+        
+        indices_to_try = [int(os.environ.get("CAMERA_INDEX", 1))]
+        if indices_to_try[0] != 0: indices_to_try.append(0)
+        
+        for idx in indices_to_try:
+            print(f"[CAMERA] Attempting to open Camera {idx}...")
+            for b_name, b_val in backends:
+                self.video.open(idx, b_val)
+                if self.video.isOpened():
+                    # Check if we can actually read a frame
+                    ret, _ = self.video.read()
+                    if ret:
+                        print(f"[CAMERA] SUCCESS! Connected to Camera {idx} using {b_name}")
+                        # Force 720p resolution for accurate focal length calibration
+                        self.video.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                        self.video.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                        return True
+                    else:
+                         print(f"[CAMERA] Opened {idx} but failed to read frame.")
+                         self.video.release()
+        
+        print("[CAMERA] CRITICAL: Could not open any camera.")
+        return False

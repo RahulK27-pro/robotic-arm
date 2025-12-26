@@ -124,12 +124,12 @@ class VisualServoingAgent:
         SERVO_MAX = 180     
         
         # Fixed servo positions for Stage 1
-        BASE_START = 0      
-        SHOULDER = 130      # High view
-        ELBOW_START = 130   
+        BASE_START = 23      
+        SHOULDER = 100      # Optimized Search View
+        ELBOW_START = 140   
         WRIST_PITCH = 90    
         WRIST_ROLL = 12     
-        GRIPPER = 170       # Open
+        GRIPPER = 155       # Slightly closed
         
         # Initialize: Move to Start Position
         print(f"Moving to starting position...")
@@ -184,8 +184,18 @@ class VisualServoingAgent:
                         print(f"[Frame {self.frame_count}] ❌ Target confirmed lost! Switching to SEARCHING...")
                         self.state = "SEARCHING"
                 
+                # --- SAFETY CHECK: CAMERA LATENCY ---
+                if hasattr(self.camera, 'last_frame_time'):
+                    latency = time.time() - self.camera.last_frame_time
+                    if latency > 2.0:
+                        print(f"⚠️ VISION LAG ({latency:.1f}s) - PAUSING SEARCH TO PROTECT CAMERA...")
+                        time.sleep(1.0)
+                        continue 
+                # ------------------------------------
+                
                 # Perform Sweep
-                step = 3.0 # Increased speed (User Request)
+                # Reduced step size for slower scanning (User Requested)
+                step = 1.5 
                 new_base = current_base + (self.search_dir * step)
                 
                 if new_base <= SERVO_MIN:
@@ -200,7 +210,10 @@ class VisualServoingAgent:
                 self.robot.move_to([new_base, SHOULDER, ELBOW_START, WRIST_PITCH, WRIST_ROLL, GRIPPER])
                 current_base = new_base
                 
-                time.sleep(0.05)
+                current_base = new_base
+                
+                # Increased delay for camera exposure/YOLO AND to unblock UI thread
+                time.sleep(0.15)
                 continue
 
             # -----------------------------------------------------------------
@@ -330,161 +343,171 @@ class VisualServoingAgent:
     
     def _approach_and_grab(self, base, shoulder, elbow, wrist_pitch, wrist_roll):
         """
-        STAGE 2 & 3: STALKING AND BLIND COMMIT
+        STAGE 2 & 3: CLOSED-LOOP STALKING & GRAB
         
-        Move forward (Z-axis) while maintaining alignment (X-axis).
-        Stop when close (Blind Zone) and commit to grab.
+        Strategy: Stop-Look-Align-Approach
+        1. Stop to stabilize.
+        2. Check X/Y alignment.
+        3. If aligned, move 1 step closer.
+        4. Repeat until Blind Zone (<5cm).
+        5. Blind Commit -> Grab -> Lift.
         """
         from brain.visual_ik_solver import get_wrist_angles, check_reachability
+        from brain.kinematics import compute_forward_kinematics
         
         print("\n" + "=" * 60)
-        print("� STAGE 2: STALKING (Dynamic Approach)")
+        print("🕵️ STAGE 2: CLOSED-LOOP STALKING")
         print("=" * 60)
         
-        # Tuning Parameters
-        GAIN_X_STALK = 0.005 # Extremely low for stalking
-        MAX_BASE_STEP = 1.0  # Max 1 degree correction
-        BLIND_ZONE = 5.0     
-        TIMEOUT = 40.0
+        # Tuning
+        ALIGN_THRESHOLD = 20  # Pixels (Strict alignment)
+        BLIND_ZONE = 6.0      # cm
+        TIMEOUT = 60.0        # Seconds
+        MAX_STEP = 1.0        # cm per move
         
         current_base = base
         start_time = time.time()
         iteration = 0
-        last_target_dist = 30.0 # Default fallback
-        last_processed_time = 0
+        last_target_dist = 25.0
         
-        # Ensure gripper is open
+        # 1. Initial State
         self.robot.move_to([current_base, shoulder, elbow, wrist_pitch, wrist_roll, 170])
-        time.sleep(0.2)
+        time.sleep(0.5) 
         
         while self.running:
-            # Safety Timeout
+            # A. Safety
             if time.time() - start_time > TIMEOUT:
                 print("❌ Approach timeout")
                 return
-            
-            # Get Visual Data
+
+            # B. LOOK (Wait for fresh data)
+            time.sleep(0.1) # Stabilization
             detections = self.camera.last_detection
             
-            # STALE DATA CHECK
-            if detections:
-                det_time = detections[0].get('timestamp', 0)
-                if det_time <= last_processed_time:
-                    time.sleep(0.05)
-                    continue
-                last_processed_time = det_time
-                
-            if not detections:
-                print(f"[{iteration}] ⚠️ Object lost during stalk")
-                time.sleep(0.1)
-                iteration += 1 # Keep counting iterations
-                continue
+            # --- SAFETY CHECK: CAMERA LATENCY ---
+            if hasattr(self.camera, 'last_frame_time'):
+                 latency = time.time() - self.camera.last_frame_time
+                 if latency > 2.0:
+                      print(f"⚠️ VISION LAG ({latency:.1f}s) - PAUSING STALK...")
+                      time.sleep(1.0)
+                      continue
+            # ------------------------------------
             
+            if not detections:
+                print(f"[{iteration}] ⚠️ Object lost... Waiting...")
+                time.sleep(0.2)
+                continue
+                
             det = detections[0]
             error_x = det.get('error_x', 0)
             target_dist = det.get('distance_cm', -1)
             
             if target_dist <= 0:
-                time.sleep(0.1); continue
-                
+                continue
+            
             last_target_dist = target_dist
             
-            # --- CALCULATE GEOMETRY ---
-            # 1. Get current robotic reach (horizontal distance from base)
+            # C. CHECK BLIND ZONE
+            # Note: target_dist IS the gap because camera is on gripper
+            gap = target_dist 
+            print(f"[{iteration}] Gap: {gap:.1f}cm | X-Err: {error_x:.0f}px")
+            
+            if gap < BLIND_ZONE:
+                print(f"\n🎯 ENTERING BLIND ZONE ({gap:.1f}cm)... Committing to GRAB!")
+                break
+                
+            # D. ALIGN OR APPROACH
+            # If X error is too high, ONLY fix alignment, don't move forward
+            if abs(error_x) > ALIGN_THRESHOLD:
+                # Calculate correction
+                correction = 0.5 if error_x > 0 else -0.5 # Small nudge
+                if abs(error_x) > 50: correction *= 2
+                
+                new_base = current_base + correction
+                new_base = max(0, min(180, new_base))
+                
+                print(f"   ↪️ Aligning X... ({error_x:.0f}px -> Move {correction})")
+                self.robot.move_to([new_base, shoulder, elbow, wrist_pitch, wrist_roll, 170])
+                current_base = new_base
+                time.sleep(0.2) # Allow settle
+                continue # Loop back to Look
+            
+            # E. APPROACH (If aligned)
+            # Calculate next reach
             curr_pos = compute_forward_kinematics(self.robot.current_angles)
             curr_reach = math.sqrt(curr_pos[0]**2 + curr_pos[1]**2)
             
-            # 2. Estimate remaining gap
-            # Camera is on the arm/gripper, so target_dist IS the gap.
-            gap = target_dist
+            # Step size: proportional to gap but capped
+            step = max(0.5, min(MAX_STEP, gap * 0.2))
             
-            # --- STAGE 2 EXIT CONDITION: BLIND ZONE ---
-            if gap <= BLIND_ZONE:
-                print(f"\n🙈 ENTERING BLIND ZONE! Gap: {gap:.1f}cm (< {BLIND_ZONE}cm) | Dist: {target_dist:.1f}cm")
+            # We want to REACH to (Current Reach + Step)
+            # This effectively moves the TIP forward by 'step'
+            next_reach = curr_reach + step 
+            
+            # Solve IK
+            # Key Fix: visual_ik_solver now interprets input as TIP distance
+            # So pass 'next_reach' as the total distance from shoulder to object tip
+            angles = get_wrist_angles(next_reach, object_height_cm=5.0)
+            
+            if angles is None:
+                print("❌ Cannot reach further!")
                 break
                 
-            # --- STALKING MOVEMENT ---
-            # 1. Calculate new reach (Move forward gently)
-            # Step size proportional to gap, but max 1cm for smooth approach
-            # We want to INCREASE reach to close the gap.
-            step = max(0.5, min(1.0, gap * 0.10))
-            next_reach = curr_reach + step
+            s, e = angles
+            e = min(150, e) # Safety
             
-            # 2. Solve IK for next reach
-            # FIX: Convert absolute object height to relative height from shoulder pivot
-            # Default object height on table = 2.0cm. Base height = LINK_1.
-            # Relative = 2.0 - LINK_1
-            abs_height = 2.0 
-            rel_height = abs_height - LINK_1
-            
-            angles = get_wrist_angles(next_reach, object_height_cm=rel_height)
-            if angles is None:
-                # Fallback: If we are close (gap < 10), try to just reach max and grab?
-                # For now, just stop to prevent crash
-                print(f"❌ Reach limit encountered! ({next_reach:.1f}cm)")
-                if gap < 10.0:
-                    print("⚠️ Close enough? Attempting Blind Grab from here...")
-                    last_target_dist = gap # Update last known
-                    break # Force jump to stage 3
-                return
-            
-            sh_target, el_target = angles
-            el_target = min(150, el_target) # Safety caps
-            
-            # 3. Calculate Base Correction (Smoother)
-            # We correct X even while moving Z
-            base_corr = error_x * GAIN_X_STALK
-            base_corr = max(-MAX_BASE_STEP, min(MAX_BASE_STEP, base_corr))
-            
-            new_base = current_base + base_corr
-            new_base = max(0, min(180, new_base))
-            
-            # Move Robot
-            status_icon = "✓" if abs(error_x) < 20 else "drift"
-            print(f"STALK: Dist={target_dist:.1f}cm | Gap={gap:.1f}cm | Step={step:.1f} | X-Err={error_x:+3.0f} ({status_icon})")
-            
-            self.robot.move_to([new_base, sh_target, el_target, wrist_pitch, wrist_roll, 170])
-            
-            current_base = new_base
+            print(f"   ⬆️ Approaching... +{step:.1f}cm (Reach: {next_reach:.1f}cm)")
+            self.robot.move_to([current_base, s, e, wrist_pitch, wrist_roll, 170])
+            shoulder, elbow = s, e # Update current state
             iteration += 1
-            current_base = new_base
-            iteration += 1
-            time.sleep(0.4) # Stabilization delay (Stalking)
+            time.sleep(0.1)
             
-            
-        # --- STAGE 3: BLIND COMMIT ---
+        # --- STAGE 3: BLIND GRAB ---
+        self._blind_grab_sequence(current_base, shoulder, elbow, wrist_pitch, wrist_roll, last_target_dist)
+
+    def _blind_grab_sequence(self, base, shoulder, elbow, pitch, roll, gap):
+        """
+        Execute the final grab sequence.
+        """
+        from brain.visual_ik_solver import get_wrist_angles
+        from brain.kinematics import compute_forward_kinematics
+
         print("\n" + "=" * 60)
-        print("👊 STAGE 3: BLIND COMMIT (Open Loop Grab)")
+        print("👊 STAGE 3: BLIND GRAB & LIFT")
         print("=" * 60)
         
-        # Use last known target distance to finalize the grab
-        # We add a small over-reach (1.0cm) to ensure the gripper surrounds the object
-        # Since last_target_dist is the GAP, we need to add it to current reach.
+        # 1. Calculate Final Lunge
+        # We are at 'blind_zone' distance (approx 6cm).
+        # We want to surround the object.
+        # Target Reach = Current Reach + Gap + Overreach (2cm)
         curr_pos = compute_forward_kinematics(self.robot.current_angles)
         curr_reach = math.sqrt(curr_pos[0]**2 + curr_pos[1]**2)
         
-        final_reach = curr_reach + last_target_dist + 1.5 
-        print(f"Pushing blindly to final reach: {final_reach:.1f}cm (Current: {curr_reach:.1f}cm + Gap: {last_target_dist:.1f}cm + 1.5cm)")
+        final_reach = curr_reach + gap + 1.0
+        print(f"📍 Final Lunge: {final_reach:.1f}cm (Gap: {gap:.1f}cm)")
         
-        final_angles = get_wrist_angles(final_reach, object_height_cm=rel_height)
-        if final_angles:
-             s, e = final_angles
-             e = min(150, e)
-             self.robot.move_to([current_base, s, e, wrist_pitch, wrist_roll, 170])
-             time.sleep(0.5)
+        angles = get_wrist_angles(final_reach, object_height_cm=3.0) # Aim slightly lower for grip
+        
+        if angles:
+            s, e = angles
+            # Move to grip position
+            self.robot.move_to([base, s, e, pitch, roll, 170])
+            time.sleep(1.0) # Wait for settle
+            
+            # 2. GRAB
+            print("🤏 GRABBING...")
+            self.robot.move_to([base, s, e, pitch, roll, 90]) # Close
+            time.sleep(1.0)
+            
+            # 3. LIFT
+            print("🛫 LIFTING...")
+            # Lift shoulder 30 deg, Drop elbow 10 deg (to pull back slightly)
+            s_lift = max(0, min(180, s + 30))
+            e_lift = max(0, min(180, e - 10))
+            self.robot.move_to([base, s_lift, e_lift, pitch, roll, 90])
+            time.sleep(1.0)
+            
+            print("✅ GRAB COMPLETE!")
+            
         else:
-            print("❌ Could not compute final grab angles.")
-            return
-
-        # Close Gripper
-        print("🤏 CLOSING GRIPPER (Force)")
-        self.robot.move_to([current_base, s, e, wrist_pitch, wrist_roll, 90]) # Tight grip
-        time.sleep(1.0)
-        
-        # Lift
-        print("📦 LIFTING OBJECT")
-        s_lift = max(0, min(180, s + 20)) # Lift 20 deg
-        self.robot.move_to([current_base, s_lift, e, wrist_pitch, wrist_roll, 90])
-        time.sleep(0.5)
-        
-        print("\n✅ GRAB SEQUENCE COMPLETE!")
+            print("❌ Could not compute final grab pose.")
