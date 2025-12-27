@@ -94,9 +94,6 @@ const ManualControls = () => {
 
   // SSE Connection for real-time updates
   useEffect(() => {
-    // Skip if user is dragging to avoid jitter
-    if (isDragging || isSending) return;
-
     const eventSource = new EventSource(`${API_BASE}/servo_stream`);
 
     eventSource.onmessage = (event) => {
@@ -105,15 +102,17 @@ const ManualControls = () => {
         setConnectionStatus("connected");
 
         // Update sliders with actual servo positions
-        // Only update if not dragging to prevent fighting the user
+        // Only update if not actively dragging to prevent fighting the user
         if (!isDragging && !isSending) {
           const angles = data.angles;
-          setBase([angles[0]]);
-          setShoulder([angles[1]]);
-          setElbow([angles[2]]);
-          setWristPitch([angles[3]]);
-          setWristRoll([angles[4]]);
-          setGripper([angles[5]]);
+          if (angles && angles.length === 6) {
+            setBase([angles[0]]);
+            setShoulder([angles[1]]);
+            setElbow([angles[2]]);
+            setWristPitch([angles[3]]);
+            setWristRoll([angles[4]]);
+            setGripper([angles[5]]);
+          }
         }
       } catch (error) {
         console.error("Error parsing SSE data:", error);
@@ -123,13 +122,14 @@ const ManualControls = () => {
     eventSource.onerror = (error) => {
       console.error("SSE Error:", error);
       setConnectionStatus("disconnected");
-      eventSource.close();
+      // Don't close, let it auto-reconnect
     };
 
     return () => {
       eventSource.close();
     };
-  }, [isDragging, isSending]);
+  }, []); // Empty dependency array - connection persists throughout component lifecycle
+
 
   // Handler for continuous slider  movement (while dragging)
   const handleSliderChange = (setter: (val: number[]) => void) => (value: number[]) => {

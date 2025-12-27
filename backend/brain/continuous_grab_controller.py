@@ -56,9 +56,9 @@ class ContinuousGrabController:
         self.max_iterations = 100
         self.timeout = 30.0  # seconds
         
-        # Control gains
-        self.gain_x = 0.03  # Base rotation gain
-        self.max_base_step = 2.0  # Max base movement per frame
+        # Control gains (reduced for stability)
+        self.gain_x = 0.015  # Base rotation gain (reduced for smoother movement)
+        self.max_base_step = 1.0  # Max base movement per frame (reduced)
         
         # Status tracking
         self.status_message = ""
@@ -181,11 +181,11 @@ class ContinuousGrabController:
             
             self.progress = 0.3
             
-            # ===== PHASE 2: APPROACH WITH ALIGNMENT =====
+            # ===== PHASE 2: APPROACH WITH ALIGNMENT (STOP-AND-GO) =====
             self.state = GrabState.APPROACHING
             self.status_message = "Approaching with alignment..."
             
-            print("\n🚀 PHASE 2: APPROACHING (with continuous alignment)")
+            print("\n🚀 PHASE 2: APPROACHING (Stop-Measure-Move)")
             print("-" * 60)
             
             start_time = time.time()
@@ -198,11 +198,14 @@ class ContinuousGrabController:
                     self._fail("Approach timeout")
                     return
                 
-                # Get current detection
+                # STEP 1: STOP - Wait for robot to stabilize
+                time.sleep(0.3)  # Stabilization delay
+                
+                # STEP 2: MEASURE - Get current detection while stopped
                 detections = self.camera.last_detection
                 if not detections or len(detections) == 0:
                     print(f"[{iteration}] ⚠️ No object detected, waiting...")
-                    time.sleep(0.1)
+                    time.sleep(0.2)
                     iteration += 1
                     continue
                 
@@ -215,7 +218,7 @@ class ContinuousGrabController:
                 
                 if distance_cm <= 0:
                     print(f"[{iteration}] ⚠️ Cannot estimate distance")
-                    time.sleep(0.1)
+                    time.sleep(0.2)
                     iteration += 1
                     continue
                 
@@ -225,6 +228,7 @@ class ContinuousGrabController:
                     object_grabbed = True
                     break
                 
+                # STEP 3: PROCESS - Calculate new target position while stopped
                 # Check reachability
                 reachable, reason, _ = check_reachability(distance_cm, object_height_cm=5.0)
                 if not reachable:
@@ -243,8 +247,10 @@ class ContinuousGrabController:
                 current_angles = list(self.robot.current_angles)
                 
                 # Calculate base adjustment for X-axis centering
-                # error_x > 0: object is LEFT → rotate RIGHT → INCREASE base angle
-                base_correction = error_x * self.gain_x
+                # User's servo: increasing base → camera rotates LEFT
+                # error_x > 0 (LEFT) → need RIGHT → DECREASE base → NEGATIVE correction
+                # error_x < 0 (RIGHT) → need LEFT → INCREASE base → POSITIVE correction
+                base_correction = -error_x * self.gain_x
                 base_correction = max(-self.max_base_step, min(self.max_base_step, base_correction))
                 
                 new_base = current_angles[0] + base_correction
@@ -264,13 +270,12 @@ class ContinuousGrabController:
                 is_centered_y = abs(error_y) < self.xy_tolerance
                 center_status = "✓" if (is_centered_x and is_centered_y) else "✗"
                 
-                print(f"[{iteration:3d}] Dist:{distance_cm:5.1f}cm | "
-                      f"ErrX:{error_x:+4.0f}px | ErrY:{error_y:+4.0f}px | "
-                      f"Centered:{center_status} | "
-                      f"Base:{current_angles[0]:.0f}°→{new_base:.0f}° | "
-                      f"Sh:{shoulder_target:.0f}° El:{elbow_target:.0f}°")
+                print(f"[{iteration:3d}] STOPPED at {distance_cm:5.1f}cm | "
+                      f"ErrX:{error_x:+4.0f}px ErrY:{error_y:+4.0f}px {center_status} | "
+                      f"Moving: Base {current_angles[0]:.0f}°→{new_base:.0f}° | "
+                      f"S:{shoulder_target:.0f}° E:{elbow_target:.0f}°")
                 
-                # Move robot
+                # STEP 4: MOVE - Execute movement to new calculated position
                 success = self.robot.move_to(new_angles)
                 if not success:
                     self._fail("Robot movement failed")
@@ -282,7 +287,7 @@ class ContinuousGrabController:
                     self.progress = 0.3 + (distance_ratio * 0.5)
                 
                 iteration += 1
-                time.sleep(0.15)  # Small delay for stability
+                # Loop will stop and measure again at top
             
             if not object_grabbed:
                 self._fail("Max iterations reached without grabbing")
@@ -296,10 +301,18 @@ class ContinuousGrabController:
             self.status_message = "Closing gripper..."
             self.progress = 0.85
             
+            # Gradual gripper closing
             current_angles = list(self.robot.current_angles)
-            current_angles[5] = 120  # Close
+            
+            # Partial close first
+            current_angles[5] = 140  # Partial close
             self.robot.move_to(current_angles)
-            time.sleep(0.8)
+            time.sleep(0.4)
+            
+            # Full close
+            current_angles[5] = 100  # Full close
+            self.robot.move_to(current_angles)
+            time.sleep(0.6)
             
             # ===== PHASE 4: LIFT =====
             print("\n📦 PHASE 4: LIFTING OBJECT")
