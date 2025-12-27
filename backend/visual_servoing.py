@@ -184,36 +184,45 @@ class VisualServoingAgent:
                  self._approach_sequence(current_base, current_shoulder, current_elbow, WRIST_PITCH, WRIST_ROLL)
                  return
 
-            # ALIGNMENT LOGIC (ANFIS) - Robot is STOPPED, process error
+            # ALIGNMENT LOGIC (Iterative Step)
             self.state = "ALIGNING"
             self.current_telemetry["mode"] = "ALIGNING"
-            self.current_telemetry["active_brain"] = "Center"
+            self.current_telemetry["active_brain"] = "Simple Step"
             
-            # Predict Correction using ANFIS and INVERT for servo direction
-            # User's servo: increasing base → camera rotates LEFT
-            # error_x > 0 (object LEFT) → need camera RIGHT → DECREASE base → NEGATIVE correction
-            # error_x < 0 (object RIGHT) → need camera LEFT → INCREASE base → POSITIVE correction
-            correction = -self.predict_center(error_x)
-            
-            # Apply Safety Limits
-            correction = max(-1.5, min(1.5, correction))
-            
-            # Fallback if ANFIS doesn't provide correction
-            if correction == 0 and abs(error_x) > 20:
-                 # error_x > 0 (LEFT) → NEGATIVE correction to go RIGHT
-                 correction = -0.3 if error_x > 0 else 0.3
-            
-            # Calculate new target position
-            current_base += correction
-            current_base = max(0, min(180, current_base))
-            
-            self.current_telemetry["correction_x"] = correction
-            
-            print(f"[Align] ErrX: {error_x:.0f} -> Corr: {correction:.2f} -> Moving to Base: {current_base:.1f}")
-            
-            # Move to new position (robot will stop there)
-            self.robot.move_to([current_base, current_shoulder, current_elbow, WRIST_PITCH, WRIST_ROLL, GRIPPER])
-            # Loop will wait at top for stabilization before next error check
+            # Inner Loop: Step until error is zero (or minimal)
+            # User requested loop "untill error becomes zero"
+            while abs(error_x) > 20: 
+                if not self.running: break
+                
+                # Direction Logic:
+                # User reported previous logic moved AWAY from object. Inverting.
+                # error_x > 0 (object LEFT) -> need camera LEFT -> INCREASE base? 
+                # (Whatever the previous mapping was, we just flip it here)
+                step = 1.0 if error_x > 0 else -1.0
+                
+                current_base += step
+                current_base = max(0, min(180, current_base))
+                
+                self.current_telemetry["correction_x"] = step
+                print(f"[Align Loop] ErrX: {error_x:.0f} -> Step: {step:.1f} -> Base: {current_base:.1f}")
+                
+                # Move
+                self.robot.move_to([current_base, current_shoulder, current_elbow, WRIST_PITCH, WRIST_ROLL, GRIPPER])
+                
+                # Wait for stabilization and new frame
+                time.sleep(0.5)
+                
+                # Update Error
+                detections = self.camera.last_detection
+                if not detections:
+                    print("⚠️ Lost Object during alignment!")
+                    break
+                
+                det = detections[0]
+                error_x = det['error_x']
+                self.current_telemetry["distance"] = det.get('distance_cm', 25.0)
+
+            # Once aligned (error < 20) or object lost, continue to outer loop to verify or search
 
     def _approach_sequence(self, base, shoulder, elbow, pitch, roll):
         print("\n" + "=" * 60)
