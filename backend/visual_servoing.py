@@ -64,7 +64,11 @@ class VisualServoingAgent:
 
         # --- LOAD MODELS ---
         # 1. Centering Brain (Error -> Correction)
-        # 1 Input (Error px), ~5 Rules (Based on check_dims.py trace)
+        # Using new 'anfis_x' model trained on collected data
+        # 1 Input (Error px), 5 Rules, Range (-400, 400)
+        self.brain_x = load_anfis("anfis_x", inputs=1, rules=5, ranges=[(-400, 400)])
+        
+        # Legacy/Fallback (Optional, keep if needed or remove)
         self.brain_center = load_anfis("anfis_center", inputs=1, rules=5, ranges=[(-600, 600)])
         
         # 2. Kinematics Brains (Dist, Y_px -> Angle)
@@ -74,9 +78,9 @@ class VisualServoingAgent:
         self.brain_shoulder = load_anfis("anfis_shoulder", inputs=2, rules=12, ranges=ranges_kin)
         self.brain_elbow = load_anfis("anfis_elbow", inputs=2, rules=12, ranges=ranges_kin)
         
-        self.use_anfis = (self.brain_center is not None)
+        self.use_anfis = (self.brain_x is not None)
         if not self.use_anfis:
-            print("[ANFIS] CRITICAL: Centering brain missing. Falling back might be unstable.")
+            print("[ANFIS] CRITICAL: X-Axis brain (anfis_x) missing. Falling back to simple steps.")
 
     def get_status(self):
         """Get current servoing status & telemetry."""
@@ -86,12 +90,12 @@ class VisualServoingAgent:
             "telemetry": self.current_telemetry
         }
 
-    def predict_center(self, error):
-        """ (Error) -> Correction Angle """
-        if not self.brain_center: return 0.0
+    def predict_x(self, error):
+        """ (Error) -> Correction Delta (Degrees) """
+        if not self.brain_x: return None
         with torch.no_grad():
             inp = torch.tensor([[error]], dtype=torch.float32)
-            return self.brain_center(inp).item()
+            return self.brain_x(inp).item()
 
     def predict_joints(self, dist, y_px):
         """ (Dist, Y) -> (Shoulder, Elbow) """
@@ -187,30 +191,39 @@ class VisualServoingAgent:
             # ALIGNMENT LOGIC (Iterative Step)
             self.state = "ALIGNING"
             self.current_telemetry["mode"] = "ALIGNING"
-            self.current_telemetry["active_brain"] = "Simple Step"
+            self.current_telemetry["active_brain"] = "ANFIS X"
             
             # Inner Loop: Step until error is zero (or minimal)
-            # User requested loop "untill error becomes zero"
             while abs(error_x) > 20: 
                 if not self.running: break
                 
-                # Direction Logic:
-                # User reported previous logic moved AWAY from object. Inverting.
-                # error_x > 0 (object LEFT) -> need camera LEFT -> INCREASE base? 
-                # (Whatever the previous mapping was, we just flip it here)
-                step = 1.0 if error_x > 0 else -1.0
+                # Predict Correction using ANFIS
+                pred_corr = self.predict_x(error_x)
+                
+                if pred_corr is not None:
+                     # Use ANFIS prediction
+                     # Logic: New Angle = Current + Prediction
+                     step = pred_corr
+                     # Limit single step size for safety initially? 
+                     # Provide a "smoothing" factor if it's too aggressive.
+                     # But user asked for "fast and smooth movement"
+                     step = max(-30, min(30, step)) # Safety clamp
+                else:
+                    # Fallback to simple step
+                    # (Direction was inverted previously: Error>0 -> Step=1, else -1)
+                    step = 1.0 if error_x > 0 else -1.0
                 
                 current_base += step
                 current_base = max(0, min(180, current_base))
                 
                 self.current_telemetry["correction_x"] = step
-                print(f"[Align Loop] ErrX: {error_x:.0f} -> Step: {step:.1f} -> Base: {current_base:.1f}")
+                print(f"[Align Loop] ErrX: {error_x:.0f} -> ANFIS: {step:.2f}° -> Base: {current_base:.1f}")
                 
                 # Move
                 self.robot.move_to([current_base, current_shoulder, current_elbow, WRIST_PITCH, WRIST_ROLL, GRIPPER])
                 
-                # Wait for stabilization and new frame
-                time.sleep(0.5)
+                # Wait for stabilization (User demanded separate wait)
+                time.sleep(1.0)
                 
                 # Update Error
                 detections = self.camera.last_detection
@@ -258,14 +271,17 @@ class VisualServoingAgent:
                 return
 
             # 4. PROCESS - Calculate corrections while stopped
-            # Maintain X Alignment (servo direction: increase base = LEFT)
+            # Maintain X Alignment using ANFIS
             if abs(error_x) > 30:
-                # error_x > 0 (object LEFT) → need RIGHT → DECREASE base → NEGATIVE
-                # error_x < 0 (object RIGHT) → need LEFT → INCREASE base → POSITIVE
-                corr = -0.3 if error_x > 0 else 0.3
+                pred_corr = self.predict_x(error_x)
+                if pred_corr is not None:
+                    corr = pred_corr * 0.5 # Damping during approach for safety
+                else:
+                    corr = 0.3 if error_x > 0 else -0.3 # Fallback
+                    
                 current_base += corr
                 current_base = max(0, min(180, current_base))
-                print(f"   (X-Adjust needed: {corr:.2f})")
+                print(f"   (X-Adjust: {corr:.2f})")
             
             # Calculate next distance target
             target_dist = real_dist - step_cms
