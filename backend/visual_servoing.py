@@ -1,6 +1,8 @@
 import time
 import math
 import threading
+import datetime
+import os
 from hardware.robot_driver import RobotArm
 from camera import VideoCamera
 import torch
@@ -18,10 +20,22 @@ class VisualServoingAgent:
     4. GRAB: Close gripper when distance reached.
     """
     
+    
+    
     def __init__(self, robot: RobotArm, camera: VideoCamera):
         self.robot = robot
         self.camera = camera
         self.running = False
+        
+        # LOGGING SETUP
+        self.log_dir = "logs"
+        if not os.path.exists(self.log_dir):
+            os.makedirs(self.log_dir)
+        
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.log_file = os.path.join(self.log_dir, f"debug_log_{timestamp}.txt")
+        self.log(f"📝 Logging started to {self.log_file}")
+        
         self.thread = None
         self.frame_count = 0
         self.state = "SEARCHING" 
@@ -49,22 +63,32 @@ class VisualServoingAgent:
                 if os.path.exists(path):
                     model.load_state_dict(torch.load(path))
                     model.eval()
-                    print(f"[ANFIS] Loaded {name} from {path}")
+                    self.log(f"[ANFIS] Loaded {name} from {path}")
                     return model
                 else:
-                    print(f"[ANFIS] Warning: {path} not found.")
+                    self.log(f"[ANFIS] Warning: {path} not found.")
                     return None
             except Exception as e:
-                print(f"[ANFIS] Error loading {name}: {e}")
+                self.log(f"[ANFIS] Error loading {name}: {e}")
                 return None
 
         # --- LOAD X-AXIS MODEL ONLY ---
-        # 1 Input (Error px), 5 Rules, Range (-400, 400)
         self.brain_x = load_anfis("anfis_x", inputs=1, rules=5, ranges=[(-400, 400)])
         
         self.use_anfis = (self.brain_x is not None)
         if not self.use_anfis:
-            print("[ANFIS] CRITICAL: X-Axis brain (anfis_x) missing. Falling back to simple steps.")
+            self.log("[ANFIS] CRITICAL: X-Axis brain (anfis_x) missing. Falling back to simple steps.")
+
+    def log(self, message):
+        """Print to console and append to log file."""
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        full_msg = f"[{timestamp}] {message}"
+        print(full_msg, flush=True)
+        try:
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                f.write(full_msg + "\n")
+        except Exception as e:
+            print(f"❌ Log setup failed: {e}")
 
     def get_status(self):
         """Get current servoing status & telemetry."""
@@ -88,16 +112,16 @@ class VisualServoingAgent:
         self.running = True
         self.thread = threading.Thread(target=self._servoing_loop, daemon=True)
         self.thread.start()
-        print(f"🚀 Servoing STARTED for '{target_object_name}'")
+        self.log(f"🚀 Servoing STARTED for '{target_object_name}'")
         
     def stop(self):
         self.running = False
         if self.thread:
             self.thread.join(timeout=1.0)
-        print("🛑 Servoing STOPPED")
+        self.log("🛑 Servoing STOPPED")
 
     def _servoing_loop(self):
-        print("=" * 60, flush=True)
+        self.log("=" * 60)
         print("🎯 VISUAL SERVOING STARTED (SEARCH & ALIGN)", flush=True)
         print("=" * 60, flush=True)
         
@@ -214,11 +238,11 @@ class VisualServoingAgent:
         - Stop when distance ≤ 10cm or shoulder ≤ 0°
         - Close gripper
         """
-        print("\n" + "=" * 60)
-        print("🚀 STAGE 3: ITERATIVE APPROACH WITH Y-ALIGNMENT")
-        print("=" * 60)
+        self.log("\n" + "=" * 60)
+        self.log("🚀 STAGE 3: ITERATIVE APPROACH WITH Y-ALIGNMENT")
+        self.log("=" * 60)
         
-        DISTANCE_THRESHOLD = 9.0  # cm
+        DISTANCE_THRESHOLD = 5.0  # cm
         SHOULDER_LIMIT = 0  # degrees
         Y_ERROR_THRESHOLD = 20  # pixels
         GRIPPER_OPEN = 170
@@ -232,21 +256,23 @@ class VisualServoingAgent:
         
         while self.running:
             iteration += 1
+            self.log(f"\n--- Approach Iteration #{iteration} ---")
             
             # Get current detection
             time.sleep(0.3)  # Stabilization
             detections = self.camera.last_detection
             
             if not detections:
-                print("⚠️ Lost object during approach!", flush=True)
+                self.log("⚠️ Lost object during approach!")
                 
                 # Check blind safety
                 if last_known_distance < 15.0:
-                     print(f"🎯 Blind Grab Triggered! (Last dist: {last_known_distance}cm)", flush=True)
-                     self._execute_ik_grab(base, last_known_distance, pitch, roll)
+                     self.log(f"🛑 Destination Reached (Blind Spot)! Last dist: {last_known_distance}cm")
+                     self.log("🛑 STOPPING SERVOING.")
+                     self.running = False
                      return
                 else:
-                     print(f"❌ Object lost too far ({last_known_distance}cm) for blind grab. Stopping.", flush=True)
+                     self.log(f"❌ Object lost too far ({last_known_distance}cm). Stopping.")
                      break
             
             det = detections[0]
@@ -254,6 +280,7 @@ class VisualServoingAgent:
             if dist > 0: last_known_distance = dist # Update if valid
             
             error_y = det['error_y']
+            self.log(f"[DEBUG] Detection: Dist={dist:.1f}cm, ErrY={error_y:.0f}px")
             
             # Update telemetry
             self.current_telemetry["mode"] = "APPROACHING"
@@ -261,32 +288,36 @@ class VisualServoingAgent:
             
             # Check distance threshold (PRIMARY TRIGGER)
             if dist <= DISTANCE_THRESHOLD:
-                print(f"🎯 Grab position reached! Distance: {dist:.1f}cm", flush=True)
-                self._execute_ik_grab(base, dist, pitch, roll)
+                self.log(f"🛑 Destination Reached! Distance: {dist:.1f}cm")
+                self.log("🛑 STOPPING SERVOING.")
+                self.running = False
                 return
             
             # Check shoulder limit (SAFETY BACKUP)
             if shoulder <= SHOULDER_LIMIT:
-                print(f"⚠️ Shoulder limit reached ({shoulder}°)! Grabbing anyway...", flush=True)
-                self._execute_ik_grab(base, dist, pitch, roll)
+                self.log(f"🛑 Destination Reached (Shoulder Limit {shoulder}°).")
+                self.log("🛑 STOPPING SERVOING.")
+                self.running = False
                 return
             
             # Step 1: Decrease shoulder by 1° (move forward)
-            print(f"[DEBUG] Decrementing shoulder from {shoulder} to {shoulder-1}")
+            self.log(f"[DEBUG] Decrementing shoulder from {shoulder} to {shoulder-1}")
             shoulder -= 1
             shoulder = max(0, shoulder)  # Safety clamp
             
-            print(f"\n[Approach #{iteration}] Shoulder: {shoulder}° | Distance: {dist:.1f}cm", flush=True)
+            self.log(f"[Approach Move] Shoulder: {shoulder}° | Distance: {dist:.1f}cm")
             self.robot.move_to([base, shoulder, elbow, pitch, roll, GRIPPER_OPEN])
-            print("[DEBUG] Shoulder move command sent. Sleeping 0.5s...", flush=True)
+            self.log("[DEBUG] Shoulder move command sent. Sleeping 0.5s...")
             time.sleep(0.5)
             
             # Step 2: Y-axis alignment loop (iterative)
-            print(f"  [Y-Align] Starting with error_y: {error_y:.0f}px", flush=True)
+            self.log(f"  [Y-Align] Starting with error_y: {error_y:.0f}px")
             
             y_iterations = 0
             while abs(error_y) > Y_ERROR_THRESHOLD:
-                if not self.running: break
+                if not self.running: 
+                    self.log("  [DEBUG] Loop stopped (running=False)")
+                    break
                 
                 y_iterations += 1
                 
@@ -298,7 +329,7 @@ class VisualServoingAgent:
                 elbow += step
                 elbow = max(0, min(180, elbow))  # Safety clamp
                 
-                print(f"    [Y-Step {y_iterations}] ErrY: {error_y:.0f}px -> Elbow: {elbow:.1f}°", flush=True)
+                self.log(f"    [Y-Step {y_iterations}] ErrY: {error_y:.0f}px -> Elbow: {elbow:.1f}°")
                 
                 # Move
                 self.robot.move_to([base, shoulder, elbow, pitch, roll, GRIPPER_OPEN])
@@ -307,25 +338,25 @@ class VisualServoingAgent:
                 # Get fresh detection
                 detections = self.camera.last_detection
                 if not detections:
-                    print("    ⚠️ Lost object during Y alignment!", flush=True)
+                    self.log("    ⚠️ Lost object during Y alignment!")
                     break
                 
                 det = detections[0]
                 error_y = det['error_y']
-                print(f"    [DEBUG] New error_y: {error_y:.0f}px", flush=True)
+                self.log(f"    [DEBUG] New error_y: {error_y:.0f}px")
                 
                 # Safety: max Y-axis iterations
                 if y_iterations > 50:
-                    print("    ⚠️ Y-axis max iterations reached!", flush=True)
+                    self.log("    ⚠️ Y-axis max iterations reached!")
                     break
             
-            print("  [DEBUG] Y-Align loop finished/skipped.", flush=True)
+            self.log("  [DEBUG] Y-Align loop finished/skipped.")
             
-            print(f"  ✅ Y-Axis aligned! Final error: {error_y:.0f}px")
+            self.log(f"  ✅ Y-Axis aligned! Final error: {error_y:.0f}px")
             
             # Safety: max approach iterations
             if iteration > 150:
-                print("⚠️ Max approach iterations reached!")
+                self.log("⚠️ Max approach iterations reached!")
                 break
     
     def _compute_horizontal_reach(self, shoulder_deg, elbow_deg):
