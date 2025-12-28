@@ -7,17 +7,19 @@ from hardware.robot_driver import RobotArm
 from camera import VideoCamera
 import torch
 import os
+import numpy as np
+import joblib
 from brain.anfis_pytorch import ANFIS
 from brain.visual_ik_solver import get_wrist_angles, GRIPPER_LENGTH
 
 class VisualServoingAgent:
     """
-    Visual Servoing Agent (Simplified)
+    Visual Servoing Agent with Hybrid ML Control
     
     1. SEARCH: Sweep until object found.
     2. ALIGN: Use 'anfis_x' to align X (Base) axis only.
-    3. APPROACH: Iterative shoulder step-down with Y-axis correction.
-    4. GRAB: Close gripper when distance reached.
+    3. HYBRID REACH: Use MLP to predict Shoulder/Elbow/Base_Correction and execute smooth reach.
+    4. GRASP: Close gripper.
     """
     
     
@@ -72,12 +74,34 @@ class VisualServoingAgent:
                 self.log(f"[ANFIS] Error loading {name}: {e}")
                 return None
 
-        # --- LOAD X-AXIS MODEL ONLY ---
+        # --- LOAD X-AXIS ANFIS MODEL ---
         self.brain_x = load_anfis("anfis_x", inputs=1, rules=5, ranges=[(-400, 400)])
         
         self.use_anfis = (self.brain_x is not None)
         if not self.use_anfis:
             self.log("[ANFIS] CRITICAL: X-Axis brain (anfis_x) missing. Falling back to simple steps.")
+        
+        # --- LOAD MLP REACH MODEL ---
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        model_path = os.path.join(base_dir, 'brain', 'models', 'reach_model.pkl')
+        scaler_path = os.path.join(base_dir, 'brain', 'models', 'reach_scaler.pkl')
+        
+        try:
+            if os.path.exists(model_path) and os.path.exists(scaler_path):
+                self.reach_model = joblib.load(model_path)
+                self.reach_scaler = joblib.load(scaler_path)
+                self.log(f"[MLP] Loaded reach model from {model_path}")
+                self.use_mlp = True
+            else:
+                self.log(f"[MLP] Warning: Reach model not found. Hybrid reach disabled.")
+                self.use_mlp = False
+                self.reach_model = None
+                self.reach_scaler = None
+        except Exception as e:
+            self.log(f"[MLP] Error loading reach model: {e}")
+            self.use_mlp = False
+            self.reach_model = None
+            self.reach_scaler = None
 
     def log(self, message):
         """Print to console and append to log file."""
@@ -180,10 +204,10 @@ class VisualServoingAgent:
             else:
                 self.centered_frames = 0
             
-            # If centered for required frames, START APPROACH!
+            # If centered for required frames, START HYBRID REACH!
             if self.centered_frames >= self.required_centered_frames:
-                 print("🎯 X-Axis Centered! Starting approach...", flush=True)
-                 self._approach_with_alignment(current_base, current_shoulder, current_elbow, WRIST_PITCH, WRIST_ROLL)
+                 print("🎯 X-Axis Centered! Starting hybrid reach...", flush=True)
+                 self._hybrid_ml_reach(current_base, det['error_y'], dist_cm, WRIST_PITCH, WRIST_ROLL)
                  return
 
             # ALIGNMENT LOGIC (Iterative Step)
@@ -230,7 +254,128 @@ class VisualServoingAgent:
 
             # Once aligned (error < 20) or object lost, continue to outer loop to verify or search
 
-    def _approach_with_alignment(self, base, shoulder, elbow, pitch, roll):
+    def s_curve(self, t):
+        """S-Curve smoothing function (0 to 1)."""
+        return 3*t**2 - 2*t**3
+    
+    def _hybrid_ml_reach(self, aligned_base, pixel_y, depth_cm, pitch, roll):
+        """
+        HYBRID ML REACH: Use MLP to predict target angles and execute smooth reach.
+        
+        Args:
+            aligned_base: Base angle after ANFIS X-alignment
+            pixel_y: Y-axis pixel error from detection
+            depth_cm: Depth in cm from detection
+            pitch, roll: Fixed wrist angles
+        """
+        self.log("\n" + "=" * 60)
+        self.log("🚀 STAGE 3: HYBRID ML REACH")
+        self.log("=" * 60)
+        
+        if not self.use_mlp:
+            self.log("❌ MLP model not loaded. Cannot execute hybrid reach.")
+            self.log("Falling back to manual control or stopping.")
+            self.running = False
+            return
+        
+        # Update telemetry
+        self.current_telemetry["mode"] = "ML_PREDICTING"
+        self.current_telemetry["active_brain"] = "MLP"
+        
+        # Prepare input for MLP
+        X_input = np.array([[pixel_y, depth_cm]])
+        X_scaled = self.reach_scaler.transform(X_input)
+        
+        # Predict angles
+        y_pred = self.reach_model.predict(X_scaled)
+        shoulder_target, elbow_target, base_correction = y_pred[0]
+        
+        # Clamp predictions to safe ranges
+        shoulder_target = np.clip(shoulder_target, 0, 180)
+        elbow_target = np.clip(elbow_target, 0, 180)
+        base_correction = np.clip(base_correction, -30, 30)
+        
+        # Calculate final base angle
+        base_target = aligned_base + base_correction
+        base_target = np.clip(base_target, 0, 180)
+        
+        self.log(f"📊 MLP Prediction:")
+        self.log(f"   Input: [Pixel_Y={pixel_y:.0f}px, Depth={depth_cm:.1f}cm]")
+        self.log(f"   Output: Shoulder={shoulder_target:.1f}°, Elbow={elbow_target:.1f}°")
+        self.log(f"   Base Correction: {base_correction:.1f}° (Base: {aligned_base:.1f}° → {base_target:.1f}°)")
+        
+        # Update telemetry with predictions
+        self.current_telemetry["mode"] = "ML_REACHING"
+        self.current_telemetry["predicted_shoulder"] = shoulder_target
+        self.current_telemetry["predicted_elbow"] = elbow_target
+        self.current_telemetry["base_correction"] = base_correction
+        
+        # Get current angles
+        current_base = aligned_base
+        current_shoulder = self.robot.current_angles[1]
+        current_elbow = self.robot.current_angles[2]
+        
+        self.log("\n🎯 Executing S-Curve Reach...")
+        self.log(f"   Base: {current_base:.1f}° → {base_target:.1f}°")
+        self.log(f"   Shoulder: {current_shoulder:.1f}° → {shoulder_target:.1f}°")
+        self.log(f"   Elbow: {current_elbow:.1f}° → {elbow_target:.1f}°")
+        
+        # Open gripper
+        GRIPPER_OPEN = 170
+        self.robot.move_to([int(current_base), int(current_shoulder), int(current_elbow), pitch, roll, GRIPPER_OPEN])
+        time.sleep(0.5)
+        
+        # S-Curve interpolation (20 steps over 2 seconds)
+        steps = 20
+        for i in range(steps + 1):
+            if not self.running:
+                break
+            
+            t = i / steps
+            t_smooth = self.s_curve(t)
+            
+            # Interpolate all axes
+            base = current_base + (base_target - current_base) * t_smooth
+            shoulder = current_shoulder + (shoulder_target - current_shoulder) * t_smooth
+            elbow = current_elbow + (elbow_target - current_elbow) * t_smooth
+            
+            self.robot.move_to([
+                int(base),
+                int(shoulder),
+                int(elbow),
+                pitch,
+                roll,
+                GRIPPER_OPEN
+            ])
+            
+            time.sleep(0.1)
+        
+        self.log("✅ Reach complete!")
+        
+        # Grasp
+        self.log("\n🤏 Closing gripper...")
+        self.current_telemetry["mode"] = "GRASPING"
+        
+        GRIPPER_CLOSED = 120
+        self.robot.move_to([
+            int(base_target),
+            int(shoulder_target),
+            int(elbow_target),
+            pitch,
+            roll,
+            GRIPPER_CLOSED
+        ])
+        
+        time.sleep(1)
+        self.log("✅ Gripper closed!")
+        self.log("\n" + "=" * 60)
+        self.log("✅ HYBRID ML REACH COMPLETE")
+        self.log("=" * 60)
+        
+        # Stop servoing
+        self.running = False
+    
+    def _approach_with_alignment_OLD(self, base, shoulder, elbow, pitch, roll):
         """
         Iterative approach with Y-axis alignment.
         - Decrease shoulder by 1° per step (moving forward)
