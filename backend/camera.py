@@ -11,8 +11,8 @@ from brain.distance_estimator import (
     KNOWN_OBJECT_WIDTHS
 )
 from brain.visual_ik_solver import GRIPPER_LENGTH
+from hybrid_tracker import HybridTracker
 import os
-import threading
 
 class VideoCamera(object):
     def __init__(self, detection_mode='yolo', center_tolerance=25, focal_length_override=None):
@@ -103,6 +103,12 @@ class VideoCamera(object):
         # Frame containers for async inference
         self.latest_frame_for_inference = None
         self.inference_lock = threading.Lock()
+        
+        # Hybrid Tracker for Blind Spot handling (<15cm)
+        self.hybrid_tracker = HybridTracker()
+        self.last_detection_distance = 999.0  # Track distance for handover
+        self.hybrid_mode_active = False
+        print("[INFO] Hybrid Tracker initialized for <15cm blind spot handling.")
         
         # Start background capture thread
         print("[INFO] Starting background capture thread...")
@@ -420,7 +426,7 @@ class VideoCamera(object):
     
     def find_objects_yolo(self, frame):
         """
-        Find objects using YOLO detection.
+        Find objects using YOLO detection with Hybrid Tracker handover at <15cm.
         Filters to target_object if set, and calculates center alignment errors.
         """
         if self.yolo_detector is None:
@@ -431,7 +437,85 @@ class VideoCamera(object):
         frame_center_x = width // 2
         frame_center_y = height // 2
         
-        # Detect objects
+        # --- HYBRID TRACKING LOGIC ---
+        # If last detection was <15cm, activate hybrid mode
+        use_hybrid = self.last_detection_distance < 15.0
+        
+        if use_hybrid:
+            if not self.hybrid_mode_active:
+                print(f"[HYBRID] Activating tracker at {self.last_detection_distance:.1f}cm")
+                self.hybrid_mode_active = True
+            
+            # Use hybrid tracker (YOLO + CSRT fallback)
+            result = self.hybrid_tracker.get_target(frame, self.yolo_detector.model, target_class=self.target_object)
+            
+            if result['source'] != 'NONE':
+                # Convert hybrid result to standard detection format
+                bbox = result['bbox']  # (x, y, w, h)
+                center = result['center']  # (cx, cy)
+                
+                # Convert to YOLO format [x1, y1, x2, y2] for consistency
+                x, y, w, h = bbox
+                yolo_bbox = [x, y, x+w, y+h]
+                
+                # Calculate errors
+                error_x = frame_center_x - center[0]
+                error_y = frame_center_y - center[1]
+                
+                direction_x = "RIGHT" if error_x > 0 else "LEFT" if error_x < 0 else "CENTERED"
+                direction_y = "DOWN" if error_y > 0 else "UP" if error_y < 0 else "CENTERED"
+                is_centered = abs(error_x) <= self.center_tolerance and abs(error_y) <= self.center_tolerance
+                
+                # Distance estimation from bbox (approximate)
+                # Use width-based estimation
+                obj_name = self.target_object if self.target_object else "bottle"
+                if obj_name in self.known_object_widths:
+                    real_width = self.known_object_widths[obj_name]
+                    pixel_width = w
+                    distance_cm = (real_width * self.focal_length) / pixel_width if pixel_width > 0 else 999
+                    distance_cm = max(0.0, distance_cm - GRIPPER_LENGTH)
+                    distance_status = f"{distance_cm:.1f}cm [{result['source']}]"
+                else:
+                    distance_cm = self.last_detection_distance  # Use last known
+                    distance_status = f"{distance_cm:.1f}cm [{result['source']}-EST]"
+                
+                # Update tracking distance
+                self.last_detection_distance = distance_cm
+                
+                # Build detection dict
+                new_detections = [{
+                    'object_name': obj_name,
+                    'confidence': 0.9 if result['source'] == 'YOLO' else 0.7,  # Lower conf for tracker
+                    'x': center[0],
+                    'y': center[1],
+                    'cm_x': 0,  # Not used in servoing
+                    'cm_y': 0,
+                    'bbox': yolo_bbox,
+                    'center': center,
+                    'error_x': error_x,
+                    'error_y': error_y,
+                    'direction_x': direction_x,
+                    'direction_y': direction_y,
+                    'is_centered': is_centered,
+                    'distance_cm': distance_cm,
+                    'distance_status': distance_status,
+                    'timestamp': time.time(),
+                    'source': result['source']  # Track source
+                }]
+                
+                self.last_detection = new_detections
+                return
+            else:
+                # Even hybrid failed
+                print("[HYBRID] Tracker lost object too.")
+                self.last_detection = []
+                return
+        
+        # --- STANDARD YOLO MODE (distance >= 15cm OR first detection) ---
+        if self.hybrid_mode_active:
+            print(f"[HYBRID] Deactivating tracker (dist >= 15cm)")
+            self.hybrid_mode_active = False
+        
         detections = self.yolo_detector.detect_objects(frame)
         
         # Filter by target_object if set
@@ -446,7 +530,6 @@ class VideoCamera(object):
             object_center_x = (bbox[0] + bbox[2]) // 2
             
             # Target Point: 1/4th from the TOP of the bounding box (as per user request)
-            # Center was: (bbox[1] + bbox[3]) // 2
             bbox_height = bbox[3] - bbox[1]
             object_center_y = int(bbox[1] + (bbox_height * 0.25))
             
@@ -455,8 +538,6 @@ class VideoCamera(object):
             error_y = frame_center_y - object_center_y
             
             # Determine movement directions
-            # error_x > 0 means object is LEFT of center → move arm RIGHT
-            # error_x < 0 means object is RIGHT of center → move arm LEFT
             direction_x = "RIGHT" if error_x > 0 else "LEFT" if error_x < 0 else "CENTERED"
             direction_y = "DOWN" if error_y > 0 else "UP" if error_y < 0 else "CENTERED"
             
@@ -475,25 +556,28 @@ class VideoCamera(object):
                 distance_cm = max(0.0, distance_cm - GRIPPER_LENGTH)
                 distance_status = f"{distance_cm:.1f}cm"
             
+            # Track distance for hybrid handover
+            if distance_cm > 0:
+                self.last_detection_distance = distance_cm
+            
             new_detections.append({
                 'object_name': det['object_name'],
                 'confidence': det['confidence'],
-                'x': det['relative_pos'][0],  # Relative pixel x
-                'y': det['relative_pos'][1],  # Relative pixel y
-                'cm_x': det['cm_x'],          # Real-world x in cm
-                'cm_y': det['cm_y'],          # Real-world y in cm
-                'bbox': det['bbox'],          # Bounding box
-                'center': (object_center_x, object_center_y),      # Center point for drawing (Updated to 1/4th top)
-                # Center-seeking data
-                'error_x': error_x,           # Pixels from center (+ = left, - = right)
-                'error_y': error_y,           # Pixels from center (+ = above, - = below)
-                'direction_x': direction_x,   # Direction to move arm
-                'direction_y': direction_y,   # Direction to move arm
-                'is_centered': is_centered,   # True if within tolerance
-                # Distance estimation
-                'distance_cm': distance_cm,   # Estimated distance to object
-                'distance_status': distance_status,  # Formatted distance string
-                'timestamp': time.time()      # Detection timestamp for latency checks
+                'x': det['relative_pos'][0],
+                'y': det['relative_pos'][1],
+                'cm_x': det['cm_x'],
+                'cm_y': det['cm_y'],
+                'bbox': det['bbox'],
+                'center': (object_center_x, object_center_y),
+                'error_x': error_x,
+                'error_y': error_y,
+                'direction_x': direction_x,
+                'direction_y': direction_y,
+                'is_centered': is_centered,
+                'distance_cm': distance_cm,
+                'distance_status': distance_status,
+                'timestamp': time.time(),
+                'source': 'YOLO'  # Track source
             })
         
         # Atomic swap
