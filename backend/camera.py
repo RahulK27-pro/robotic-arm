@@ -444,7 +444,11 @@ class VideoCamera(object):
             # Calculate object center from bounding box
             bbox = det['bbox']
             object_center_x = (bbox[0] + bbox[2]) // 2
-            object_center_y = (bbox[1] + bbox[3]) // 2
+            
+            # Target Point: 1/4th from the TOP of the bounding box (as per user request)
+            # Center was: (bbox[1] + bbox[3]) // 2
+            bbox_height = bbox[3] - bbox[1]
+            object_center_y = int(bbox[1] + (bbox_height * 0.25))
             
             # Calculate alignment error
             error_x = frame_center_x - object_center_x
@@ -479,7 +483,7 @@ class VideoCamera(object):
                 'cm_x': det['cm_x'],          # Real-world x in cm
                 'cm_y': det['cm_y'],          # Real-world y in cm
                 'bbox': det['bbox'],          # Bounding box
-                'center': det['center'],      # Center point for drawing (REQUIRED)
+                'center': (object_center_x, object_center_y),      # Center point for drawing (Updated to 1/4th top)
                 # Center-seeking data
                 'error_x': error_x,           # Pixels from center (+ = left, - = right)
                 'error_y': error_y,           # Pixels from center (+ = above, - = below)

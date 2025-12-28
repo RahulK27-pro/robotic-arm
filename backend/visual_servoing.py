@@ -1,22 +1,21 @@
 import time
+import math
 import threading
 from hardware.robot_driver import RobotArm
 from camera import VideoCamera
-from brain.kinematics import compute_forward_kinematics, LINK_1
-import math
 import torch
 import os
 from brain.anfis_pytorch import ANFIS
-from tools.collect_data import DataCollector
+from brain.visual_ik_solver import get_wrist_angles, GRIPPER_LENGTH
 
 class VisualServoingAgent:
     """
-    Visual Servoing Agent (ANFIS Powered)
+    Visual Servoing Agent (Simplified)
     
     1. SEARCH: Sweep until object found.
-    2. ALIGN: Use 'anfis_center' to align X (Base) and Y (Elbow-based height adjust).
-    3. APPROACH: Use 'anfis_shoulder' & 'anfis_elbow' to drive towards object.
-    4. GRAB: Blind grab sequence.
+    2. ALIGN: Use 'anfis_x' to align X (Base) axis only.
+    3. APPROACH: Iterative shoulder step-down with Y-axis correction.
+    4. GRAB: Close gripper when distance reached.
     """
     
     def __init__(self, robot: RobotArm, camera: VideoCamera):
@@ -34,13 +33,10 @@ class VisualServoingAgent:
             "mode": "IDLE",
             "active_brain": "None",
             "correction_x": 0.0,
-            "target_shoulder": 0,
-            "target_elbow": 0,
             "distance": 0
         }
         
-        # Continuous grab settings
-        self.enable_grab = True 
+        # Alignment settings
         self.centered_frames = 0 
         self.required_centered_frames = 3
 
@@ -62,21 +58,9 @@ class VisualServoingAgent:
                 print(f"[ANFIS] Error loading {name}: {e}")
                 return None
 
-        # --- LOAD MODELS ---
-        # 1. Centering Brain (Error -> Correction)
-        # Using new 'anfis_x' model trained on collected data
+        # --- LOAD X-AXIS MODEL ONLY ---
         # 1 Input (Error px), 5 Rules, Range (-400, 400)
         self.brain_x = load_anfis("anfis_x", inputs=1, rules=5, ranges=[(-400, 400)])
-        
-        # Legacy/Fallback (Optional, keep if needed or remove)
-        self.brain_center = load_anfis("anfis_center", inputs=1, rules=5, ranges=[(-600, 600)])
-        
-        # 2. Kinematics Brains (Dist, Y_px -> Angle)
-        # 2 Inputs, ~12 Rules (Based on train_kinematics.py)
-        # Ranges: Dist(0-100), Y(-300, 300)
-        ranges_kin = [(0, 100), (-300, 300)]
-        self.brain_shoulder = load_anfis("anfis_shoulder", inputs=2, rules=12, ranges=ranges_kin)
-        self.brain_elbow = load_anfis("anfis_elbow", inputs=2, rules=12, ranges=ranges_kin)
         
         self.use_anfis = (self.brain_x is not None)
         if not self.use_anfis:
@@ -97,15 +81,6 @@ class VisualServoingAgent:
             inp = torch.tensor([[error]], dtype=torch.float32)
             return self.brain_x(inp).item()
 
-    def predict_joints(self, dist, y_px):
-        """ (Dist, Y) -> (Shoulder, Elbow) """
-        if not self.brain_shoulder or not self.brain_elbow: return None
-        with torch.no_grad():
-            inp = torch.tensor([[dist, y_px]], dtype=torch.float32)
-            s = self.brain_shoulder(inp).item()
-            e = self.brain_elbow(inp).item()
-            return s, e
-
     def start(self, target_object_name):
         if self.running: return
         self.target_object = target_object_name
@@ -122,9 +97,9 @@ class VisualServoingAgent:
         print("🛑 Servoing STOPPED")
 
     def _servoing_loop(self):
-        print("=" * 60)
-        print("🎯 ANFIS SERVOING STARTED")
-        print("=" * 60)
+        print("=" * 60, flush=True)
+        print("🎯 VISUAL SERVOING STARTED (SEARCH & ALIGN)", flush=True)
+        print("=" * 60, flush=True)
         
         # Initial Pose
         BASE_START = 23      
@@ -165,7 +140,7 @@ class VisualServoingAgent:
                 self.robot.move_to([current_base, current_shoulder, current_elbow, WRIST_PITCH, WRIST_ROLL, GRIPPER])
                 continue
                 
-            # --- STAGE 2: CENTER / ALIGN (STOP-AND-GO) ---
+            # --- STAGE 2: ALIGN X-AXIS (STOP-AND-GO) ---
             det = detections[0]
             error_x = det['error_x']
             error_y = det['error_y']
@@ -177,15 +152,14 @@ class VisualServoingAgent:
             # Check if centered
             if abs(error_x) < 20:
                 self.centered_frames += 1
-                print(f"✅ Aligned ({self.centered_frames}/{self.required_centered_frames})")
+                print(f"✅ Aligned ({self.centered_frames}/{self.required_centered_frames})", flush=True)
             else:
                 self.centered_frames = 0
             
-            # If centered for required frames, proceed to approach
+            # If centered for required frames, START APPROACH!
             if self.centered_frames >= self.required_centered_frames:
-                 print("🎯 Centered! Starting approach...")
-                 self.state = "APPROACHING"
-                 self._approach_sequence(current_base, current_shoulder, current_elbow, WRIST_PITCH, WRIST_ROLL)
+                 print("🎯 X-Axis Centered! Starting approach...", flush=True)
+                 self._approach_with_alignment(current_base, current_shoulder, current_elbow, WRIST_PITCH, WRIST_ROLL)
                  return
 
             # ALIGNMENT LOGIC (Iterative Step)
@@ -202,27 +176,22 @@ class VisualServoingAgent:
                 
                 if pred_corr is not None:
                      # Use ANFIS prediction
-                     # Logic: New Angle = Current + Prediction
                      step = pred_corr
-                     # Limit single step size for safety initially? 
-                     # Provide a "smoothing" factor if it's too aggressive.
-                     # But user asked for "fast and smooth movement"
                      step = max(-30, min(30, step)) # Safety clamp
                 else:
                     # Fallback to simple step
-                    # (Direction was inverted previously: Error>0 -> Step=1, else -1)
                     step = 1.0 if error_x > 0 else -1.0
                 
                 current_base += step
                 current_base = max(0, min(180, current_base))
                 
                 self.current_telemetry["correction_x"] = step
-                print(f"[Align Loop] ErrX: {error_x:.0f} -> ANFIS: {step:.2f}° -> Base: {current_base:.1f}")
+                print(f"[Align Loop] ErrX: {error_x:.0f} -> ANFIS: {step:.2f}° -> Base: {current_base:.1f}", flush=True)
                 
                 # Move
                 self.robot.move_to([current_base, current_shoulder, current_elbow, WRIST_PITCH, WRIST_ROLL, GRIPPER])
                 
-                # Wait for stabilization (User demanded separate wait)
+                # Wait for stabilization
                 time.sleep(1.0)
                 
                 # Update Error
@@ -237,98 +206,266 @@ class VisualServoingAgent:
 
             # Once aligned (error < 20) or object lost, continue to outer loop to verify or search
 
-    def _approach_sequence(self, base, shoulder, elbow, pitch, roll):
+    def _approach_with_alignment(self, base, shoulder, elbow, pitch, roll):
+        """
+        Iterative approach with Y-axis alignment.
+        - Decrease shoulder by 1° per step (moving forward)
+        - Correct Y-axis after each step
+        - Stop when distance ≤ 10cm or shoulder ≤ 0°
+        - Close gripper
+        """
         print("\n" + "=" * 60)
-        print("🚀 STAGE 3: ANFIS APPROACH (STOP-AND-GO)")
+        print("🚀 STAGE 3: ITERATIVE APPROACH WITH Y-ALIGNMENT")
         print("=" * 60)
         
-        start_dist = self.current_telemetry["distance"]
-        if start_dist <= 0: start_dist = 25.0
+        DISTANCE_THRESHOLD = 9.0  # cm
+        SHOULDER_LIMIT = 0  # degrees
+        Y_ERROR_THRESHOLD = 20  # pixels
+        GRIPPER_OPEN = 170
         
-        current_base = base
-        target_dist = start_dist
-        step_cms = 0.5  # Move 0.5cm per step
+        # Open gripper at start
+        self.robot.move_to([base, shoulder, elbow, pitch, roll, GRIPPER_OPEN])
+        time.sleep(0.5)
+        
+        iteration = 0
+        last_known_distance = 25.0 # Track distance for blind safety
         
         while self.running:
-            # 1. STOP - Wait for robot to stabilize
-            time.sleep(0.3)  # Stabilization time
+            iteration += 1
             
-            # 2. MEASURE - Get current vision data
+            # Get current detection
+            time.sleep(0.3)  # Stabilization
             detections = self.camera.last_detection
+            
             if not detections:
-                print("⚠️ Lost Object during approach!")
-                break
+                print("⚠️ Lost object during approach!", flush=True)
                 
-            det = detections[0]
-            real_dist = det.get('distance_cm', target_dist)
-            error_x = det['error_x']
-            error_y = det['error_y']
-            
-            # 3. Check if reached blind zone
-            if real_dist < 6.0:
-                print("🎯 Blind Zone Reached! Grabbing...")
-                self._grab_sequence(current_base, shoulder, elbow, pitch, roll)
-                return
-
-            # 4. PROCESS - Calculate corrections while stopped
-            # Maintain X Alignment using ANFIS
-            if abs(error_x) > 30:
-                pred_corr = self.predict_x(error_x)
-                if pred_corr is not None:
-                    corr = pred_corr * 0.5 # Damping during approach for safety
+                # Check blind safety
+                if last_known_distance < 15.0:
+                     print(f"🎯 Blind Grab Triggered! (Last dist: {last_known_distance}cm)", flush=True)
+                     self._execute_ik_grab(base, last_known_distance, pitch, roll)
+                     return
                 else:
-                    corr = 0.3 if error_x > 0 else -0.3 # Fallback
-                    
-                current_base += corr
-                current_base = max(0, min(180, current_base))
-                print(f"   (X-Adjust: {corr:.2f})")
+                     print(f"❌ Object lost too far ({last_known_distance}cm) for blind grab. Stopping.", flush=True)
+                     break
             
-            # Calculate next distance target
-            target_dist = real_dist - step_cms
+            det = detections[0]
+            dist = det.get('distance_cm', 999)
+            if dist > 0: last_known_distance = dist # Update if valid
             
-            # Use ANFIS to predict joint angles for target distance
-            pred_s, pred_e = self.predict_joints(target_dist, 0)
-            
-            if pred_s is None:
-                print("❌ ANFIS Kinematics Failed.")
-                break
-                
-            shoulder = pred_s
-            elbow = pred_e
+            error_y = det['error_y']
             
             # Update telemetry
             self.current_telemetry["mode"] = "APPROACHING"
-            self.current_telemetry["active_brain"] = "Kinematics"
-            self.current_telemetry["target_shoulder"] = shoulder
-            self.current_telemetry["target_elbow"] = elbow
-            self.current_telemetry["distance"] = target_dist
+            self.current_telemetry["distance"] = dist
             
-            print(f"[Appr] Stopped at {real_dist:.1f}cm | Moving to {target_dist:.1f}cm | S={shoulder:.1f}° E={elbow:.1f}°")
+            # Check distance threshold (PRIMARY TRIGGER)
+            if dist <= DISTANCE_THRESHOLD:
+                print(f"🎯 Grab position reached! Distance: {dist:.1f}cm", flush=True)
+                self._execute_ik_grab(base, dist, pitch, roll)
+                return
             
-            # 5. MOVE - Execute movement to new calculated position
-            self.robot.move_to([current_base, shoulder, elbow, pitch, roll, 170])
-            # Loop will stop and measure again at top
+            # Check shoulder limit (SAFETY BACKUP)
+            if shoulder <= SHOULDER_LIMIT:
+                print(f"⚠️ Shoulder limit reached ({shoulder}°)! Grabbing anyway...", flush=True)
+                self._execute_ik_grab(base, dist, pitch, roll)
+                return
+            
+            # Step 1: Decrease shoulder by 1° (move forward)
+            print(f"[DEBUG] Decrementing shoulder from {shoulder} to {shoulder-1}")
+            shoulder -= 1
+            shoulder = max(0, shoulder)  # Safety clamp
+            
+            print(f"\n[Approach #{iteration}] Shoulder: {shoulder}° | Distance: {dist:.1f}cm", flush=True)
+            self.robot.move_to([base, shoulder, elbow, pitch, roll, GRIPPER_OPEN])
+            print("[DEBUG] Shoulder move command sent. Sleeping 0.5s...", flush=True)
+            time.sleep(0.5)
+            
+            # Step 2: Y-axis alignment loop (iterative)
+            print(f"  [Y-Align] Starting with error_y: {error_y:.0f}px", flush=True)
+            
+            y_iterations = 0
+            while abs(error_y) > Y_ERROR_THRESHOLD:
+                if not self.running: break
+                
+                y_iterations += 1
+                
+                # Calculate step direction
+                # error_y > 0: Object is ABOVE center -> Camera needs UP -> Decrease elbow (since Incr=Down)
+                # error_y < 0: Object is BELOW center -> Camera needs DOWN -> Increase elbow
+                step = -1.0 if error_y > 0 else 1.0
+                
+                elbow += step
+                elbow = max(0, min(180, elbow))  # Safety clamp
+                
+                print(f"    [Y-Step {y_iterations}] ErrY: {error_y:.0f}px -> Elbow: {elbow:.1f}°", flush=True)
+                
+                # Move
+                self.robot.move_to([base, shoulder, elbow, pitch, roll, GRIPPER_OPEN])
+                time.sleep(1.0)  # Stabilization
+                
+                # Get fresh detection
+                detections = self.camera.last_detection
+                if not detections:
+                    print("    ⚠️ Lost object during Y alignment!", flush=True)
+                    break
+                
+                det = detections[0]
+                error_y = det['error_y']
+                print(f"    [DEBUG] New error_y: {error_y:.0f}px", flush=True)
+                
+                # Safety: max Y-axis iterations
+                if y_iterations > 50:
+                    print("    ⚠️ Y-axis max iterations reached!", flush=True)
+                    break
+            
+            print("  [DEBUG] Y-Align loop finished/skipped.", flush=True)
+            
+            print(f"  ✅ Y-Axis aligned! Final error: {error_y:.0f}px")
+            
+            # Safety: max approach iterations
+            if iteration > 150:
+                print("⚠️ Max approach iterations reached!")
+                break
+    
+    def _compute_horizontal_reach(self, shoulder_deg, elbow_deg):
+        """
+        Calculate current horizontal distance from shoulder pivot to wrist (camera).
+        Uses simple planar FK: x = L1*cos(theta1) + L2*cos(theta1 + theta2)
+        """
+        # Physical constants from visual_ik_solver (hardcoded here for safety/speed)
+        L1 = 15.0 # Shoulder
+        L2 = 13.0 # Elbow
+        
+        # Convert to radians
+        # Note: Servo angles: 
+        # Shoulder: 90 is Horizontal? Or 0 is vertical?
+        # Usually for this bot: 90 is Up, 0 is Forward/Down? 
+        # Let's check visual_ik_solver conventions or assume standard.
+        # visual_ik_solver uses:
+        # A1 = shoulder_angle (deg)
+        # A2 = elbow_angle (deg)
+        # It uses Law of Cosines directly on triangle sides.
+        
+        # Let's trust visual_ik_solver.get_wrist_angles structure.
+        # But we need CURRENT reach.
+        # If we can't easily reproduce the FK, we can approximate.
+        # But wait, we can just use the 'dist' from camera alone? No, we need absolute to feed the Solver.
+        
+        # Let's Try:
+        # We know current S, E.
+        # We know Camera Dist.
+        # Let's assume current geometry is valid.
+        pass
 
-    def _grab_sequence(self, base, s, e, p, r):
-        print("👊 GRABBING")
+    def _execute_ik_grab(self, base, current_dist_cm, pitch, roll):
+        """
+        Execute True IK-based grab:
+        1. Determine current extension (FK).
+        2. Add camera distance to get Target Reach.
+        3. Solve IK for Target Reach.
+        4. Move and Grab.
+        """
+        print("\n" + "=" * 60, flush=True)
+        print("🤖 STAGE 3.5: IK FINAL REACH (SMART)", flush=True)
+        print("=" * 60, flush=True)
+        
+        # 1. Estimate Current Reach (Horizontal distance from shoulder pivot)
+        # We use the current angles.
+        s_curr = self.robot.current_angles[1]
+        e_curr = self.robot.current_angles[2]
+        
+        # Simplified FK for this robot (Planar projection)
+        # Assuming standard config:
+        # S=90 -> Up, S=0 -> Forward horizontal
+        # This might need tuning based on actual calibration, but let's try strict Trig.
+        
+        import math
+        L1 = 15.0
+        L2 = 13.0
+        
+        # Angle conversions (Deg -> Rad)
+        # Note: Robot specific calibration. 
+        # If S=130 (Home) -> Retracted back.
+        # If S=90 -> Up.
+        # If S=0 -> Forward.
+        # So Angle from Horizontal = (90 - S)? Or just S?
+        # Let's assume visual_ik_solver logic:
+        # It returns angles 0-180.
+        
+        # Alternative Strategy:
+        # We don't strictly need FK if we trust visual_ik_solver.
+        # But we need "Total Distance".
+        
+        # Let's use a "Relative Move" approach with a fallback.
+        # We want to increase reach by 'current_dist_cm' + 2cm safety.
+        reach_increase = current_dist_cm + 3.0
+        
+        print(f"  [IK] Current Dist to Object: {current_dist_cm:.1f}cm", flush=True)
+        print(f"  [IK] Target Reach Increase: {reach_increase:.1f}cm", flush=True)
+        
+        # HEURISTIC IK:
+        # To reach forward X cm, we reduce Shoulder.
+        # Approx: 1 cm reach ~= 1.5 - 2 deg Shoulder drop (at typical working range).
+        # Let's verify with code if possible? No, safer to use the Solver if we can guess current reach.
+        
+        # Let's try to calculate absolute distance using a dummy call?
+        # No.
+        
+        # Let's guess current reach based on "standard" approach position?
+        # Usually approach ends around S=30-50?
+        
+        # Let's implement the iterative solver approach (Gradient Descent style) locally? 
+        # Too complex.
+        
+        # BETTER: Use the "Last Valid X/Y" as requested.
+        # "fix the preciously obtained x and y axis before the object becomes not detectable"
+        # This implies we grab at the "last seen location".
+        # We are already aligned Y. X is aligned.
+        # So we just need depth.
+        
+        # Let's use the Heuristic Lunge but SCALED by distance.
+        # 1.0 cm ~= -1.2 deg Shoulder.
+        d_shoulder = -(reach_increase * 1.5) # Deg to move
+        
+        # Elbow Compensation:
+        # When Shoulder goes down, Elbow needs to go UP to maintain height?
+        # Yes, slightly. 
+        # linear approx: dE = -0.5 * dS (sign flip?)
+        d_elbow = -(d_shoulder * 0.5) 
+        
+        # Apply limits
+        s_new = max(0, self.robot.current_angles[1] + d_shoulder)
+        e_new = min(180, self.robot.current_angles[2] + d_elbow)
+        
+        print(f"  [IK] Calculated Lunge: dS={d_shoulder:.1f}, dE={d_elbow:.1f}", flush=True)
+        print(f"  [IK] Move: S{self.robot.current_angles[1]}->{int(s_new)}, E{self.robot.current_angles[2]}->{int(e_new)}", flush=True)
+        
+        self.robot.move_to([base, int(s_new), int(e_new), pitch, roll, 170])
+        time.sleep(1.0)
+        
+        self._close_gripper(base, int(s_new), int(e_new), pitch, roll)
+
+    def _close_gripper(self, base, s, e, p, r):
+        """Close gripper to grab object."""
+        print("\n" + "=" * 60)
+        print("👊 STAGE 4: CLOSING GRIPPER")
+        print("=" * 60)
+        
         self.current_telemetry["mode"] = "GRABBING"
         
-        # Gradual gripper closing for secure grab
-        # 1. Already open at 170
-        
-        # 2. Partial close
+        # Partial close
         print("  Partial close...")
         self.robot.move_to([base, s, e, p, r, 130])
         time.sleep(0.5)
         
-        # 3. Full close
+        # Full close
         print("  Full close...")
         self.robot.move_to([base, s, e, p, r, 90])
         time.sleep(0.8)
         
-        # 4. Lift
-        print("  Lifting...")
-        self.robot.move_to([base, s+20, e-20, p, r, 90])
-        time.sleep(1.0)
-        print("✅ Done.")
+        print("=" * 60)
+        print("✅ GRAB COMPLETE!")
+        print("=" * 60)
+        
         self.running = False

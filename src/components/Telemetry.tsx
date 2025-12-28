@@ -13,8 +13,6 @@ interface ServoingTelemetry {
     mode: string;
     active_brain: string;
     correction_x: number;
-    target_shoulder: number;
-    target_elbow: number;
     distance: number;
 }
 
@@ -31,8 +29,6 @@ const Telemetry = () => {
         mode: "IDLE",
         active_brain: "None",
         correction_x: 0,
-        target_shoulder: 0,
-        target_elbow: 0,
         distance: 0
     });
 
@@ -157,18 +153,12 @@ const Telemetry = () => {
                         </div>
                     </div>
 
-                    <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div className="grid grid-cols-2 gap-2 text-xs">
                         <div className="bg-muted/50 p-2 rounded">
                             <div className="text-muted-foreground mb-1 flex items-center gap-1">
                                 <ArrowLeftRight className="w-3 h-3" /> CORR X
                             </div>
                             <div className="font-mono">{anfisStats.correction_x.toFixed(2)}°</div>
-                        </div>
-                        <div className="bg-muted/50 p-2 rounded">
-                            <div className="text-muted-foreground mb-1 flex items-center gap-1">
-                                <Target className="w-3 h-3" /> S / E
-                            </div>
-                            <div className="font-mono">{anfisStats.target_shoulder.toFixed(0)}° / {anfisStats.target_elbow.toFixed(0)}°</div>
                         </div>
                         <div className="bg-muted/50 p-2 rounded">
                             <div className="text-muted-foreground mb-1 flex items-center gap-1">
