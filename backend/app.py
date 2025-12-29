@@ -7,6 +7,7 @@ from brain.kinematics import solve_angles, compute_forward_kinematics
 from hardware.robot_driver import RobotArm
 from visual_servoing import VisualServoingAgent
 from features.mimic_logic import MimicController
+from pick_place_controller import PickPlaceController
 import traceback
 import time
 import json
@@ -24,7 +25,19 @@ global_camera = VideoCamera(detection_mode='yolo')
 # Initialize robot in HARDWARE mode to communicate with Arduino on COM4
 # If Arduino is not connected, it will automatically fall back to simulation mode
 robot = RobotArm(simulation_mode=False, port='COM4', baudrate=115200)
-servoing_agent = VisualServoingAgent(robot, global_camera)
+
+# Initialize pick-and-place controller
+pick_place_ctrl = PickPlaceController(robot)
+
+# Initialize visual servoing agent with pick-and-place callback
+def on_grab_complete_callback():
+    """Automatically trigger pick-and-place after grab completion."""
+    print("\n" + "="*60)
+    print("🎯 GRAB COMPLETE - STARTING PICK-AND-PLACE")
+    print("="*60 + "\n")
+    pick_place_ctrl.start(target_base_angle=0)
+
+servoing_agent = VisualServoingAgent(robot, global_camera, on_grab_complete=on_grab_complete_callback)
 
 # ... (Routes) ...
 
@@ -46,6 +59,54 @@ def stop_servoing():
 @app.route('/servoing_status', methods=['GET'])
 def get_servoing_status():
     return jsonify(servoing_agent.get_status())
+
+# --- PICK-AND-PLACE INTEGRATION ---
+@app.route('/pick_place/start', methods=['POST'])
+def start_pick_place():
+    """Start pick-and-place operation."""
+    try:
+        data = request.json or {}
+        target_angle = data.get('target_base_angle', 0)  # Default to 0 degrees
+        
+        success = pick_place_ctrl.start(target_base_angle=target_angle)
+        
+        if success:
+            return jsonify({
+                "status": "started",
+                "target_angle": target_angle,
+                "message": "Pick-and-place sequence started"
+            })
+        else:
+            return jsonify({
+                "status": "already_running",
+                "message": "Pick-and-place is already in progress"
+            }), 400
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/pick_place/stop', methods=['POST'])
+def stop_pick_place():
+    """Emergency stop pick-and-place operation."""
+    try:
+        pick_place_ctrl.stop()
+        return jsonify({
+            "status": "stopped",
+            "message": "Pick-and-place stopped"
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/pick_place/status', methods=['GET'])
+def get_pick_place_status():
+    """Get current pick-and-place status and telemetry."""
+    try:
+        status = pick_place_ctrl.get_status()
+        return jsonify(status)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 # --- MIMIC MODE INTEGRATION ---
 mimic_thread = None

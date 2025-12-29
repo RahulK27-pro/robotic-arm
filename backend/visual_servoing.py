@@ -24,10 +24,11 @@ class VisualServoingAgent:
     
     
     
-    def __init__(self, robot: RobotArm, camera: VideoCamera):
+    def __init__(self, robot: RobotArm, camera: VideoCamera, on_grab_complete=None):
         self.robot = robot
         self.camera = camera
         self.running = False
+        self.on_grab_complete = on_grab_complete  # Callback for pick-and-place trigger
         
         # LOGGING SETUP
         self.log_dir = "logs"
@@ -374,6 +375,14 @@ class VisualServoingAgent:
         
         # Stop servoing
         self.running = False
+        
+        # Trigger pick-and-place callback if configured
+        if self.on_grab_complete:
+            print("\n🔗 Triggering pick-and-place sequence...")
+            try:
+                self.on_grab_complete()
+            except Exception as e:
+                print(f"❌ Error triggering pick-and-place: {e}")
     
     def _approach_with_alignment_OLD(self, base, shoulder, elbow, pitch, roll):
         """
@@ -645,3 +654,12 @@ class VisualServoingAgent:
         print("=" * 60)
         
         self.running = False
+        
+        # Trigger pick-and-place callback if configured
+        if self.on_grab_complete:
+            print("\n🔗 Triggering pick-and-place sequence...")
+            try:
+                self.on_grab_complete()
+            except Exception as e:
+                print(f"❌ Error triggering pick-and-place: {e}")
+
