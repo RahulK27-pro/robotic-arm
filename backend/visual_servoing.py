@@ -224,12 +224,12 @@ class VisualServoingAgent:
                 pred_corr = self.predict_x(error_x)
                 
                 if pred_corr is not None:
-                     # Use ANFIS prediction
-                     step = pred_corr
-                     step = max(-30, min(30, step)) # Safety clamp
+                     # Use ANFIS prediction with aggressive damping for stability
+                     step = pred_corr * 0.3  # 30% damping to slow down movements
+                     step = max(-10, min(10, step))  # Reduced clamp for smoother motion
                 else:
                     # Fallback to simple step
-                    step = 1.0 if error_x > 0 else -1.0
+                    step = 0.5 if error_x > 0 else -0.5  # Slower fallback too
                 
                 current_base += step
                 current_base = max(0, min(180, current_base))
@@ -240,8 +240,8 @@ class VisualServoingAgent:
                 # Move
                 self.robot.move_to([current_base, current_shoulder, current_elbow, WRIST_PITCH, WRIST_ROLL, GRIPPER])
                 
-                # Wait for stabilization
-                time.sleep(1.0)
+                # Wait for stabilization - increased for visual lag
+                time.sleep(1.5)
                 
                 # Update Error
                 detections = self.camera.last_detection
