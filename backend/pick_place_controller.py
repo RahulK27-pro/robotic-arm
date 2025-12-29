@@ -256,6 +256,15 @@ class PickPlaceController:
             
             current_angles = list(self.robot.current_angles)
             
+            # Move shoulder to 90° for better placement position
+            release_position = list(current_angles)
+            release_position[1] = 90  # Shoulder to 90° (extended/down)
+            self.robot.move_to(release_position)
+            time.sleep(0.5)
+            
+            # Update current position
+            current_angles = list(self.robot.current_angles)
+            
             # Gradual gripper opening: 120° → 135° → 155°
             # First partial open
             partial_open = list(current_angles)
