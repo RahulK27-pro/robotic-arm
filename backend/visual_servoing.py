@@ -82,27 +82,60 @@ class VisualServoingAgent:
         if not self.use_anfis:
             self.log("[ANFIS] CRITICAL: X-Axis brain (anfis_x) missing. Falling back to simple steps.")
         
-        # --- LOAD MLP REACH MODEL ---
+        
+        # --- LOAD VISUAL-COMPENSATION MLP MODEL ---
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        model_path = os.path.join(base_dir, 'brain', 'models', 'reach_model.pkl')
-        scaler_path = os.path.join(base_dir, 'brain', 'models', 'reach_scaler.pkl')
+        model_path = os.path.join(base_dir, 'brain', 'models', 'visual_compensation_model.pth')
         
         try:
-            if os.path.exists(model_path) and os.path.exists(scaler_path):
-                self.reach_model = joblib.load(model_path)
-                self.reach_scaler = joblib.load(scaler_path)
-                self.log(f"[MLP] Loaded reach model from {model_path}")
+            if os.path.exists(model_path):
+                # Load checkpoint
+                checkpoint = torch.load(model_path)
+                
+                # Import model class
+                import torch.nn as nn
+                class VisualCompensationMLP(nn.Module):
+                    def __init__(self, input_size=3, hidden1=16, hidden2=8, output_size=3):
+                        super(VisualCompensationMLP, self).__init__()
+                        self.network = nn.Sequential(
+                            nn.Linear(input_size, hidden1),
+                            nn.ReLU(),
+                            nn.Linear(hidden1, hidden2),
+                            nn.ReLU(),
+                            nn.Linear(hidden2, output_size)
+                        )
+                    def forward(self, x):
+                        return self.network(x)
+                
+                # Create model
+                self.mlp_model = VisualCompensationMLP(
+                    input_size=checkpoint['input_size'],
+                    hidden1=checkpoint['hidden_size_1'],
+                    hidden2=checkpoint['hidden_size_2'],
+                    output_size=checkpoint['output_size']
+                )
+                self.mlp_model.load_state_dict(checkpoint['model_state_dict'])
+                self.mlp_model.eval()
+                
+                # Load scalers
+                self.scaler_X = checkpoint['scaler_X']
+                self.scaler_y = checkpoint['scaler_y']
+                
+                self.log(f"[MLP] Loaded visual-compensation model from {model_path}")
+                self.log(f"[MLP] Architecture: {checkpoint['input_size']} → {checkpoint['hidden_size_1']} → {checkpoint['hidden_size_2']} → {checkpoint['output_size']}")
                 self.use_mlp = True
             else:
-                self.log(f"[MLP] Warning: Reach model not found. Hybrid reach disabled.")
+                self.log(f"[MLP] Warning: Visual-compensation model not found at {model_path}")
                 self.use_mlp = False
-                self.reach_model = None
-                self.reach_scaler = None
+                self.mlp_model = None
+                self.scaler_X = None
+                self.scaler_y = None
         except Exception as e:
-            self.log(f"[MLP] Error loading reach model: {e}")
+            self.log(f"[MLP] Error loading visual-compensation model: {e}")
             self.use_mlp = False
-            self.reach_model = None
-            self.reach_scaler = None
+            self.mlp_model = None
+            self.scaler_X = None
+            self.scaler_y = None
 
     def log(self, message):
         """Print to console and append to log file."""
@@ -208,7 +241,7 @@ class VisualServoingAgent:
             # If centered for required frames, START HYBRID REACH!
             if self.centered_frames >= self.required_centered_frames:
                  print("🎯 X-Axis Centered! Starting hybrid reach...", flush=True)
-                 self._hybrid_ml_reach(current_base, det['error_y'], dist_cm, WRIST_PITCH, WRIST_ROLL)
+                 self._hybrid_ml_reach(current_base, det, WRIST_PITCH, WRIST_ROLL)
                  return
 
             # ALIGNMENT LOGIC (Iterative Step)
@@ -259,7 +292,7 @@ class VisualServoingAgent:
         """S-Curve smoothing function (0 to 1)."""
         return 3*t**2 - 2*t**3
     
-    def _hybrid_ml_reach(self, aligned_base, pixel_y, depth_cm, pitch, roll):
+    def _hybrid_ml_reach(self, aligned_base, detection, pitch, roll):
         """
         HYBRID ML REACH: Use MLP to predict target angles and execute smooth reach.
         
@@ -283,13 +316,24 @@ class VisualServoingAgent:
         self.current_telemetry["mode"] = "ML_PREDICTING"
         self.current_telemetry["active_brain"] = "MLP"
         
-        # Prepare input for MLP
-        X_input = np.array([[pixel_y, depth_cm]])
-        X_scaled = self.reach_scaler.transform(X_input)
+        # Extract visual features from detection
+        pixel_y = detection['error_y']
+        depth_cm = detection.get('distance_cm', 25.0)
+        bbox = detection['bbox']
+        bbox_width = bbox[2] - bbox[0]  # Calculate bounding box width
+        
+        # Prepare input for MLP: [pixel_y, depth_cm, bbox_width]
+        features = np.array([[pixel_y, depth_cm, bbox_width]])
+        features_normalized = self.scaler_X.transform(features)
+        features_tensor = torch.FloatTensor(features_normalized)
         
         # Predict angles
-        y_pred = self.reach_model.predict(X_scaled)
-        shoulder_target, elbow_target, base_correction = y_pred[0]
+        with torch.no_grad():
+            output_normalized = self.mlp_model(features_tensor).numpy()
+        
+        # Denormalize
+        output = self.scaler_y.inverse_transform(output_normalized)
+        shoulder_target, elbow_target, base_correction = output[0]
         
         # Clamp predictions to safe ranges
         shoulder_target = np.clip(shoulder_target, 0, 180)
@@ -301,7 +345,7 @@ class VisualServoingAgent:
         base_target = np.clip(base_target, 0, 180)
         
         self.log(f"📊 MLP Prediction:")
-        self.log(f"   Input: [Pixel_Y={pixel_y:.0f}px, Depth={depth_cm:.1f}cm]")
+        self.log(f"   Input: [Pixel_Y={pixel_y:.0f}px, Depth={depth_cm:.1f}cm, BBox_Width={bbox_width}px]")
         self.log(f"   Output: Shoulder={shoulder_target:.1f}°, Elbow={elbow_target:.1f}°")
         self.log(f"   Base Correction: {base_correction:.1f}° (Base: {aligned_base:.1f}° → {base_target:.1f}°)")
         
