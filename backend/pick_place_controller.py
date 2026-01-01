@@ -50,7 +50,7 @@ class PickPlaceController:
         self.PLACE_SHOULDER = 100  # Forward/down position
         self.PLACE_ELBOW = 140     # More open (lowers wrist)
         self.GRIPPER_CLOSED = 120
-        self.GRIPPER_OPEN = 155
+        self.GRIPPER_OPEN = 170  # Full open for complete release
         self.HOME_POSITION = [23, 100, 140, 90, 12, 155]
         
         print("✅ PickPlaceController initialized")
@@ -135,8 +135,12 @@ class PickPlaceController:
             # Interpolate all servo angles
             current_angles = []
             for j in range(6):
-                angle = start_angles[j] + (target_angles[j] - start_angles[j]) * t_smooth
-                current_angles.append(int(angle))
+                # LOCK UNCHANGED JOINTS to prevent float drift
+                if start_angles[j] == target_angles[j]:
+                    current_angles.append(int(start_angles[j]))
+                else:
+                    angle = start_angles[j] + (target_angles[j] - start_angles[j]) * t_smooth
+                    current_angles.append(int(angle))
             
             # Move robot
             self.robot.move_to(current_angles)
@@ -167,17 +171,22 @@ class PickPlaceController:
             
             # Get current position
             current_angles = list(self.robot.current_angles)
+            # FORCE-LOCK wrist angles in START position to prevent drift-based interpolation
+            current_angles[3] = 90  # Wrist pitch
+            current_angles[4] = 12  # Wrist roll
             
             # Target: Raise shoulder and close elbow to lift
             lift_angles = list(current_angles)
             lift_angles[1] = self.LIFT_SHOULDER  # Shoulder backward/up
             lift_angles[2] = self.LIFT_ELBOW     # Elbow more closed
+            lift_angles[3] = 90  # LOCK wrist pitch to prevent twitch
+            lift_angles[4] = 12  # LOCK wrist roll
             
             self._smooth_move(
                 start_angles=current_angles,
                 target_angles=lift_angles,
-                duration=2.5,
-                steps=25,
+                duration=2.3,  # 1.5x faster than 3.5s
+                steps=23,
                 phase_name="LIFTING"
             )
             
@@ -198,8 +207,14 @@ class PickPlaceController:
             print(f"{'='*60}")
             
             current_angles = list(self.robot.current_angles)
+            # FORCE-LOCK wrist angles
+            current_angles[3] = 90
+            current_angles[4] = 12
+            
             rotate_angles = list(current_angles)
             rotate_angles[0] = self.target_base_angle  # Base rotation only
+            rotate_angles[3] = 90  # LOCK wrist pitch to prevent twitch
+            rotate_angles[4] = 12  # LOCK wrist roll
             
             self._smooth_move(
                 start_angles=current_angles,
@@ -226,15 +241,21 @@ class PickPlaceController:
             print(f"{'='*60}")
             
             current_angles = list(self.robot.current_angles)
+            # FORCE-LOCK wrist angles
+            current_angles[3] = 90
+            current_angles[4] = 12
+            
             lower_angles = list(current_angles)
-            lower_angles[1] = self.PLACE_SHOULDER  # Shoulder forward/down
-            lower_angles[2] = self.PLACE_ELBOW     # Elbow more open
+            lower_angles[1] = 90  # Shoulder to final placement position (extended/down)
+            lower_angles[2] = self.PLACE_ELBOW  # Elbow more open
+            lower_angles[3] = 90  # LOCK wrist pitch to prevent twitch
+            lower_angles[4] = 12  # LOCK wrist roll
             
             self._smooth_move(
                 start_angles=current_angles,
                 target_angles=lower_angles,
-                duration=2.5,
-                steps=25,
+                duration=2.3,  # 1.5x faster than 3.5s
+                steps=23,
                 phase_name="LOWERING"
             )
             
@@ -254,15 +275,6 @@ class PickPlaceController:
             print("🤲 PHASE 4: RELEASING OBJECT")
             print(f"{'='*60}")
             
-            current_angles = list(self.robot.current_angles)
-            
-            # Move shoulder to 90° for better placement position
-            release_position = list(current_angles)
-            release_position[1] = 90  # Shoulder to 90° (extended/down)
-            self.robot.move_to(release_position)
-            time.sleep(0.5)
-            
-            # Update current position
             current_angles = list(self.robot.current_angles)
             
             # Gradual gripper opening: 120° → 135° → 155°
