@@ -203,7 +203,7 @@ class VisualServoingAgent:
             
             # --- STAGE 1: SEARCH ---
             # Stop and get current detection
-            time.sleep(0.3)  # Wait for robot to stabilize
+            time.sleep(0.15)  # Wait for robot to stabilize (Faster search)
             detections = self.camera.last_detection
             
             if not detections:
@@ -212,7 +212,7 @@ class VisualServoingAgent:
                 self.current_telemetry["active_brain"] = "None"
                 
                 # Simple Sweep (reduced speed)
-                step = 1.0
+                step = 1.0 # 1.0 step for smoothness, 0.15s delay for speed
                 current_base += (self.search_dir * step)
                 if current_base <= 0 or current_base >= 180:
                     self.search_dir *= -1
