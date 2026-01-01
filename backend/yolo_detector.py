@@ -68,8 +68,8 @@ class YOLODetector:
         if self.mapper is None:
             self.mapper = CoordinateMapper(width, height)
         
-        # Run YOLO inference (Lower confidence for YOLO-World)
-        results = self.model(frame, conf=0.10, verbose=False)
+        # Run YOLO inference
+        results = self.model(frame, conf=self.confidence_threshold, verbose=False)
         
         detections = []
         

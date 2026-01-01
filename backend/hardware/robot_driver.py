@@ -16,6 +16,7 @@ class RobotArm:
         """
         self.simulation_mode = simulation_mode
         self.current_angles = [0, 130, 130, 90, 12, 170]  # Default neutral position
+        self.last_sent_angles = None # Track last sent command to prevent spamming
         self.serial = None
         self.port = port
         self.baudrate = baudrate
@@ -54,7 +55,7 @@ class RobotArm:
         except SerialException as e:
             raise SerialException(f"Could not open serial port {self.port}: {e}")
 
-    def move_to(self, angles, speed=1.0):
+    def move_to(self, angles, speed=1.0, force=False):
         """
         Moves the robot to the specified angles.
         
@@ -132,6 +133,12 @@ class RobotArm:
                 # Format packet: <90,45,120,90,90,10>
                 # Use hardware_angles for transmission
                 int_angles = [int(a) for a in hardware_angles]
+                
+                # OPTIMIZATION: "AND Gate" - Only send if command changed
+                if not force and self.last_sent_angles == int_angles:
+                    # self.current_angles = clamped_angles # Still update local state? Yes, actually safe to just return.
+                    return True
+                    
                 packet = f"<{','.join(map(str, int_angles))}>"
                 
                 # Send packet WITH newline terminator
@@ -152,6 +159,7 @@ class RobotArm:
 
                 
                 self.current_angles = clamped_angles # Store USER angles
+                self.last_sent_angles = int_angles   # Store HARDWARE angles
                 return True
                 
             except SerialException as e:

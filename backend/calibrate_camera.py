@@ -58,7 +58,7 @@ def main():
     print(f"   Camera resolution: {actual_width}x{actual_height}")
     
     # Initialize YOLO
-    detector = YOLODetector(confidence_threshold=0.25)
+    detector = YOLODetector(confidence_threshold=0.4)
     
     focal_length = None
     

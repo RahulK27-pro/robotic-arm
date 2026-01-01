@@ -15,7 +15,10 @@ import threading
 import cv2
 import numpy as np
 
-load_dotenv()
+# Load .env from the backend directory explicitly
+import os
+basedir = os.path.abspath(os.path.dirname(__file__))
+load_dotenv(os.path.join(basedir, '.env'))
 
 app = Flask(__name__)
 CORS(app)
