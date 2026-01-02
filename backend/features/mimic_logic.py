@@ -14,6 +14,7 @@ REAL_PALM_WIDTH = 8.5   # cm (Average palm width)
 FOCAL_LENGTH = 1424     # From calibration
 CENTER_TOLERANCE = 50   # Pixels within which palm is "centered"
 SMOOTHING_ALPHA = 0.10  # 0.10 = Very Smooth/Heavy, 0.15 = Smooth, 0.5 = Fast/Jittery
+DEADBAND_PIXELS = 15    # Ignore movements smaller than this to prevent jitter
 
 class SmoothFilter:
     def __init__(self, alpha=0.15):
@@ -169,8 +170,15 @@ class MimicController:
                         self.palm_center = (int(palm_x), int(palm_y))
                     
                     # === CENTERING ERROR CALCULATION ===
-                    error_x = frame_center_x - palm_x
-                    error_y = frame_center_y - palm_y
+                    raw_error_x = frame_center_x - palm_x
+                    raw_error_y = frame_center_y - palm_y
+                    
+                    # Apply DEADBAND (Stability)
+                    if abs(raw_error_x) < DEADBAND_PIXELS: raw_error_x = 0
+                    if abs(raw_error_y) < DEADBAND_PIXELS: raw_error_y = 0
+                    
+                    error_x = raw_error_x
+                    error_y = raw_error_y
                     
                     # Check if centered
                     is_centered = abs(error_x) <= CENTER_TOLERANCE and abs(error_y) <= CENTER_TOLERANCE
@@ -197,14 +205,30 @@ class MimicController:
                     # This allows full 15-45cm range to be displayed and used
                     s_reach = self.smooth_depth.update(distance_cm)
                     
-                    # === GRIPPER (Thumb-Index Pinch) ===
-                    thumb_x = hand_lm.landmark[4].x * w
-                    thumb_y = hand_lm.landmark[4].y * h
-                    index_x = hand_lm.landmark[8].x * w
-                    index_y = hand_lm.landmark[8].y * h
-                    pinch = math.hypot(index_x - thumb_x, index_y - thumb_y)
-                    gripper = 120 if pinch < 40 else 180
-                    gripper_state = "CLOSED" if gripper == 120 else "OPEN"
+                    # === GRIPPER (FIST DETECTION) ===
+                    # Check if all fingers are curled towards wrist
+                    # Compare distance of fingertips (8,12,16,20) to wrist(0) vs PIP joints(6,10,14,18) to wrist(0)
+                    # Simple heuristic: If fingertips are close to wrist
+                    
+                    wrist = hand_lm.landmark[0]
+                    fingers_closed = 0
+                    tip_ids = [8, 12, 16, 20] # Index, Middle, Ring, Pinky
+                    
+                    # Scale invariant threshold based on palm size reference (wrist to middle_mcp(9))
+                    palm_ref_len = math.hypot(hand_lm.landmark[9].x - wrist.x, hand_lm.landmark[9].y - wrist.y)
+                    close_threshold = palm_ref_len * 1.2 # Tips should be within this dist from wrist
+                    
+                    for tip_id in tip_ids:
+                        tip = hand_lm.landmark[tip_id]
+                        dist_to_wrist = math.hypot(tip.x - wrist.x, tip.y - wrist.y)
+                        if dist_to_wrist < close_threshold:
+                            fingers_closed += 1
+                            
+                    # Also check thumb (tip 4 vs ip 3 and mcp 2) - Thumb is tricky, let's stick to 4 fingers for sturdy fist
+                    is_fist = fingers_closed >= 3 # Allow one finger loose/tracking error
+                    
+                    gripper = 120 if is_fist else 180
+                    gripper_state = "CLOSED" if is_fist else "OPEN"
                     
                     # === UPDATE TELEMETRY ===
                     with self.telemetry_lock:
@@ -248,11 +272,11 @@ class MimicController:
                         base_correction = max(-MAX_STEP, min(MAX_STEP, base_correction))
                     new_base = max(0, min(180, current_base + base_correction))
                     
-                    # Map reach to shoulder and elbow (FULL RANGE)
-                    # Close palm (20cm) -> shoulder=155°, elbow=150° (minimum reach)
-                    # Far palm (65cm) -> shoulder=0°, elbow=0° (maximum reach)
-                    base_shoulder = np.interp(s_reach, [20, 65], [155, 0])
-                    base_elbow = np.interp(s_reach, [20, 65], [150, 0])
+                    # Map reach to shoulder and elbow (FULL RANGE - EXTENDED DISTANCE)
+                    # Close palm (20cm) -> shoulder=155°, elbow=150° (Retracted)
+                    # Far palm (90cm) -> shoulder=0°, elbow=0° (Full Extension enabled at distance)
+                    base_shoulder = np.interp(s_reach, [20, 90], [155, 0])
+                    base_elbow = np.interp(s_reach, [20, 90], [150, 0])
                     
                     # Apply Y-axis centering correction on top of reach-based elbow
                     elbow_correction = -(s_error_y * GAIN_Y)  # Negative because up = lower angle
