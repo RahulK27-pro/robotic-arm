@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Send, Loader2, Bot, User } from "lucide-react";
+import { Send, Loader2, Bot, User, Mic, MicOff } from "lucide-react";
 
 interface Message {
   role: "user" | "assistant";
@@ -16,10 +16,19 @@ interface AICommandCenterProps {
   onServoUpdate?: (angles: number[]) => void;
 }
 
+// Minimal definition for Web Speech API
+interface IWindow extends Window {
+  webkitSpeechRecognition: any;
+  SpeechRecognition: any;
+}
+
 const AICommandCenter = ({ onServoUpdate }: AICommandCenterProps) => {
   const { addLog } = useLogs();
   const [command, setCommand] = useState("");
   const [loading, setLoading] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
+
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
@@ -48,12 +57,13 @@ const AICommandCenter = ({ onServoUpdate }: AICommandCenterProps) => {
     setLoading(false);
   };
 
-  const handleSendCommand = async () => {
-    if (!command.trim()) return;
+  const handleSendCommand = async (textOverride?: string) => {
+    const userText = textOverride || command.trim();
+    if (!userText) return;
 
-    const userText = command.trim();
+    if (!textOverride) setCommand(""); // Clear input if it was typed
+
     addMessage("user", userText);
-    setCommand("");
     setLoading(true);
 
     try {
@@ -165,6 +175,68 @@ const AICommandCenter = ({ onServoUpdate }: AICommandCenterProps) => {
     }
   };
 
+  const toggleListening = () => {
+    if (isListening) {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      setIsListening(false);
+      return;
+    }
+
+    const w = window as any as IWindow;
+    const SpeechRecognition = w.SpeechRecognition || w.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      addMessage("assistant", "Error: Voice recognition is not supported in this browser.");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => {
+      setIsListening(true);
+      addLog("VOICE", "Listening started...");
+    };
+
+    recognition.onresult = (event: any) => {
+      const text = event.results[0][0].transcript;
+      addLog("VOICE", `Detected: "${text}"`);
+      setCommand(text); // Show in input
+      handleSendCommand(text); // Auto submit
+    };
+
+    recognition.onerror = (event: any) => {
+      console.error("Speech recognition error", event.error);
+      let errorMessage = `Voice error: ${event.error}`;
+
+      if (event.error === 'network') {
+        errorMessage = "Network error: Voice recognition requires an internet connection.";
+      } else if (event.error === 'not-allowed') {
+        errorMessage = "Microphone access denied. Please allow permissions.";
+      } else if (event.error === 'no-speech') {
+        errorMessage = "No speech detected. Please try again.";
+        return; // specific case: don't stop/reset if just silence, or handle gently
+      }
+
+      addMessage("assistant", errorMessage);
+      addLog("ERROR", errorMessage);
+      setIsListening(false);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+      addLog("VOICE", "Listening stopped.");
+    };
+
+    recognitionRef.current = recognition;
+    recognition.start();
+  };
+
   useEffect(() => {
     return () => stopPolling();
   }, []);
@@ -217,20 +289,43 @@ const AICommandCenter = ({ onServoUpdate }: AICommandCenterProps) => {
                 </div>
               </div>
             )}
+            {isListening && (
+              <div className="flex gap-3 justify-end items-center animate-pulse">
+                <span className="text-xs text-primary font-mono">Listening...</span>
+                <div className="flex-shrink-0 w-8 h-8 rounded bg-red-100 flex items-center justify-center">
+                  <Mic className="h-4 w-4 text-red-500" />
+                </div>
+              </div>
+            )}
           </div>
         </ScrollArea>
 
         <div className="flex gap-2">
+          <Button
+            variant={isListening ? "destructive" : "outline"}
+            size="icon"
+            onClick={toggleListening}
+            disabled={loading}
+            className={isListening ? "animate-pulse ring-2 ring-red-400" : ""}
+            title="Voice Command"
+          >
+            {isListening ? (
+              <MicOff className="h-4 w-4" />
+            ) : (
+              <Mic className="h-4 w-4" />
+            )}
+          </Button>
+
           <Input
             placeholder="Try 'Pick up the bottle' or 'Move to the cup'..."
             value={command}
             onChange={(e) => setCommand(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleSendCommand()}
             className="bg-muted border-border font-mono text-sm"
-            disabled={loading}
+            disabled={loading || isListening}
           />
           <Button
-            onClick={handleSendCommand}
+            onClick={() => handleSendCommand()}
             disabled={loading || !command.trim()}
             className="bg-primary hover:bg-primary/90"
           >
