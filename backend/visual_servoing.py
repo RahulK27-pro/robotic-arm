@@ -163,14 +163,15 @@ class VisualServoingAgent:
             inp = torch.tensor([[error]], dtype=torch.float32)
             return self.brain_x(inp).item()
 
-    def start(self, target_object_name):
+    def start(self, target_object_name, auto_place=True):
         if self.running: return
         self.target_object = target_object_name
+        self.auto_place = auto_place  # Flag to determine next action
         self.camera.set_target_object(target_object_name)
         self.running = True
         self.thread = threading.Thread(target=self._servoing_loop, daemon=True)
         self.thread.start()
-        self.log(f"🚀 Servoing STARTED for '{target_object_name}'")
+        self.log(f"🚀 Servoing STARTED for '{target_object_name}' (Auto-Place: {auto_place})")
         
     def stop(self):
         self.running = False
@@ -253,28 +254,59 @@ class VisualServoingAgent:
             while abs(error_x) > 20: 
                 if not self.running: break
                 
-                # Predict Correction using ANFIS
-                pred_corr = self.predict_x(error_x)
+                # FORCE SLOW MOVEMENT FOR FINE TUNING
+                if abs(error_x) < 100:
+                    # User requested: "1 degree per second when less than 100px offset"
+                    # Threshold lowered to 100px to keep ANFIS active longer
+                    step = 1.0 if error_x > 0 else -1.0
+                    delay_time = 1.0 # 1 second delay -> 1 deg/sec effectively
+                    print(f"  [Fine Tune] Error {error_x:.0f} < 100px. Forcing 1 deg step.", flush=True)
+                else: 
+                    # Use ANFIS for large adjustments
+                    pred_corr = self.predict_x(error_x)
+                    if pred_corr is not None:
+                        step = pred_corr * 0.6 
+                        step = max(-15, min(15, step)) 
+                    else:
+                        step = 2.0 if error_x > 0 else -2.0
+                    
+                    delay_time = 0.03 # Normal fast smooth loop for large moves
                 
-                if pred_corr is not None:
-                     # Use ANFIS prediction - better model allows higher confidence
-                     step = pred_corr * 0.6  # 60% damping (was 30%) - balance speed & stability
-                     step = max(-15, min(15, step))  # Increased clamp to 15° for faster movement
-                else:
-                    # Fallback to simple step
-                    step = 1.0 if error_x > 0 else -1.0  # Faster fallback
-                
-                current_base += step
-                current_base = max(0, min(180, current_base))
+                # Calculate Target
+                target_base = current_base + step
+                target_base = max(0, min(180, target_base))
                 
                 self.current_telemetry["correction_x"] = step
-                print(f"[Align Loop] ErrX: {error_x:.0f} -> ANFIS: {step:.2f}° -> Base: {current_base:.1f}", flush=True)
+                print(f"[Align Loop] ErrX: {error_x:.0f} -> ANFIS: {step:.2f}° -> Base: {current_base:.1f} -> {target_base:.1f}", flush=True)
                 
-                # Move
-                self.robot.move_to([current_base, current_shoulder, current_elbow, WRIST_PITCH, WRIST_ROLL, GRIPPER])
+                # SMOOTH LINEAR MOVEMENT (1 degree steps)
+                # To prevent sudden jumps and overshoot
+                start_b = current_base
+                end_b = target_base
                 
-                # Wait for stabilization - reduced with better model
-                time.sleep(1.0)
+                # Determine number of steps (degrees)
+                dist = abs(end_b - start_b)
+                steps = int(max(1, dist)) # Ensure at least 1 step if dist > 0
+                
+                # Increment per step (can be fractional if we want, but user asked for "each degree")
+                # We will just interpolate linearly
+                for i in range(1, steps + 1):
+                    if not self.running: break
+                    
+                    # Lerp
+                    progress = i / steps
+                    interp_base = start_b + (end_b - start_b) * progress
+                    
+                    self.robot.move_to([interp_base, current_shoulder, current_elbow, WRIST_PITCH, WRIST_ROLL, GRIPPER])
+                    
+                    # Dynamic delay: 1.0s for fine tune, 0.03s for large moves
+                    time.sleep(delay_time)
+                
+                # Ensure final position is set accurately
+                current_base = target_base
+                
+                # Wait for stabilization (reduced slightly since movement time covers some settling)
+                time.sleep(0.5)
                 
                 # Update Error
                 detections = self.camera.last_detection
@@ -421,12 +453,22 @@ class VisualServoingAgent:
         self.running = False
         
         # Trigger pick-and-place callback if configured
-        if self.on_grab_complete:
+        # Trigger pick-and-place callback if configured AND auto_place is True
+        if self.on_grab_complete and getattr(self, 'auto_place', True):
             print("\n🔗 Triggering pick-and-place sequence...")
             try:
                 self.on_grab_complete()
             except Exception as e:
                 print(f"❌ Error triggering pick-and-place: {e}")
+        elif not getattr(self, 'auto_place', True):
+            print("\n✋ Pick Only Mode: Lifting and Holding.")
+            # Lift slightly to holding position
+            lift_angles = list(self.robot.current_angles)
+            lift_angles[1] = 120 # Lift shoulder
+            lift_angles[2] = 120 # Adjust elbow
+            self.robot.move_to(lift_angles)
+            self.current_telemetry["mode"] = "HOLDING"
+            self.log("✅ Object Lifted and Held.")
     
     def _approach_with_alignment_OLD(self, base, shoulder, elbow, pitch, roll):
         """
@@ -700,10 +742,19 @@ class VisualServoingAgent:
         self.running = False
         
         # Trigger pick-and-place callback if configured
-        if self.on_grab_complete:
+        # Trigger pick-and-place callback if configured AND auto_place is True
+        if self.on_grab_complete and getattr(self, 'auto_place', True):
             print("\n🔗 Triggering pick-and-place sequence...")
             try:
                 self.on_grab_complete()
             except Exception as e:
                 print(f"❌ Error triggering pick-and-place: {e}")
+        elif not getattr(self, 'auto_place', True):
+            print("\n✋ Pick Only Mode: Lifting and Holding.")
+            lift_angles = list(self.robot.current_angles)
+            lift_angles[1] = 120 
+            lift_angles[2] = 120
+            self.robot.move_to(lift_angles)
+            self.current_telemetry["mode"] = "HOLDING"
+            self.log("✅ Object Lifted and Held.")
 

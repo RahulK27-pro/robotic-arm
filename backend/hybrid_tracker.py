@@ -59,7 +59,7 @@ class HybridTracker:
         # --- 1. YOLO DETECTION ---
         # Run inference with low confidence threshold to catch partials if possible,
         # but the request implies we expect it to fail at close range.
-        results = model(frame, verbose=False, conf=0.4) 
+        results = model(frame, verbose=False, conf=0.3) 
         
         best_det = None
         max_conf = 0.0

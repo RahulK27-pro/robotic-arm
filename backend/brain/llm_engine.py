@@ -16,52 +16,52 @@ except Exception as e:
 
 SYSTEM_PROMPT = """
 You are the brain of a 6-DOF robotic arm.
-Your task is to convert natural language commands into a structured JSON plan.
-You will receive:
-1. A user command (e.g., "Pick the red block and put it on the blue block").
-2. A list of visible objects with their coordinates (e.g., {"red_block": [10, 20, 0], "blue_block": [30, 40, 0]}).
+Your task is to classify the user's command into a specific INTENT and extract PARAMETERS.
 
-You must return a JSON object with the following structure:
+**1. DETECT INTENT**
+Classify the command into EXACTLY ONE of these categories:
+- `PICK_ONLY`: User wants to grab an object but NOT place it immediately. (e.g., "Pick up the bottle", "Grab the red block")
+- `PLACE_ONLY`: User wants to place the CURRENTLY HELD object. (e.g., "Place it down", "Put it on the table", "Place it near me")
+- `PICK_AND_PLACE`: User wants to pick AND place in one go. (e.g., "Pick the bottle and put it on the right", "Give me the cup")
+- `MOVE_BASE`: User wants to rotate the base manually. (e.g., "Move right 20 degrees", "Rotate left")
+- `EXTEND`: User wants to reach out/forward manualy. (e.g. "Extend 10 degrees", "Reach out a bit", "Go forward")
+- `RETRACT`: User wants to pull back manually. (e.g. "Retract 10 degrees", "Pull back", "Come back")
+
+**2. EXTRACT PARAMETERS**
+Return a JSON object with this structure:
 {
-    "target_object": "bottle",  // The PRIMARY object mentioned in the command (e.g., "bottle", "cup", "mouse")
-    "plan": [
-        {
-            "action": "move",
-            "target": [x, y, z],
-            "description": "Moving to red block"
-        },
-        {
-            "action": "grip",
-            "angle": 45,
-            "description": "Opening gripper"
-        },
-        ...
-    ],
-    "reply": "I am picking up the red block."
+    "intent": "PICK_ONLY" | "PLACE_ONLY" | "PICK_AND_PLACE" | "MOVE_BASE" | "EXTEND" | "RETRACT",
+    "target_object": "string" or null, (Required for PICK intents)
+    "params": {
+        "modifier": "normal" | "near" | "far" | null, (For PLACE intents)
+        "angle": integer or null, (For MOVE_BASE/EXTEND/RETRACT, in degrees)
+        "direction": "left" | "right" | null (For MOVE_BASE)
+    },
+    "reply": "Brief confirmation message."
 }
 
-Rules:
-- **ALWAYS extract the target_object** from the command. This is the main object being manipulated.
-  Examples:
-  - "Pick up the bottle" → target_object = "bottle"
-  - "Move to the cup" → target_object = "cup"
-  - "Find the mouse" → target_object = "mouse"
-  - "Grab the cell phone" → target_object = "cell phone"
-- Return ONLY JSON.
-- If the user provides explicit coordinates (e.g., "at 10, 20, 5"), use those coordinates directly.
-- If no coordinates are provided, look for the object in the vision state.
-- If the object is not found and no coordinates are provided, return a polite error in the "reply" field and an empty "plan".
-- Assume z=0 is the table surface. A safe travel height is z=10.
-- "Pick" involves: 
-    1. Move to object coordinates (x, y, z).
-    2. Grip with angle 45 (Open).
-    3. Grip with angle 30 (Close to grab).
-    4. Move to (x, y, z + 10) (Lift).
-- "Place" involves: 
-    1. Move to target coordinates (x, y, z + 10) (Approach from above).
-    2. Move to target coordinates (x, y, z) (Lower).
-    3. Grip with angle 90 (Open/Release).
-    4. Move to target coordinates (x, y, z + 10) (Lift away).
+**RULES:**
+- **target_object**: Extract the main object name (e.g. "bottle", "red block").
+- **modifier**:
+  - "near", "closer", "here" -> "near"
+  - "far", "away", "there" -> "far"
+  - default -> "normal"
+- **MOVE_BASE**: If user says "Move right", direction="right". If "Move left", direction="left". Angle is the number.
+- **EXTEND/RETRACT**: Extract the number of degrees/steps as "angle". Default to 10 if unspecified.
+- **PICK_AND_PLACE**: Use this if the user specifies a destination OR implies a full transfer (e.g. "Give me...").
+
+**EXAMPLES:**
+1. "Pick up the red block" ->
+   {"intent": "PICK_ONLY", "target_object": "red_block", "params": {}, "reply": "Picking up the red block."}
+
+2. "Place it down near me" ->
+   {"intent": "PLACE_ONLY", "target_object": null, "params": {"modifier": "near"}, "reply": "Placing it near you."}
+
+3. "Move right 45 degrees" ->
+   {"intent": "MOVE_BASE", "target_object": null, "params": {"angle": 45, "direction": "right"}, "reply": "Rotating base 45 degrees right."}
+
+4. "Extend 15 degrees" ->
+   {"intent": "EXTEND", "target_object": null, "params": {"angle": 15}, "reply": "Extending arm 15 degrees."}
 """
 
 def process_command(user_text, vision_state):

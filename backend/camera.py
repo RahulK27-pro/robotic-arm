@@ -54,7 +54,7 @@ class VideoCamera(object):
         # For YOLO detection mode
         self.yolo_detector = None
         if detection_mode == 'yolo':
-            self.yolo_detector = YOLODetector(confidence_threshold=0.35)
+            self.yolo_detector = YOLODetector(confidence_threshold=0.3)
             # Set default classes for YOLO-World
             if hasattr(self.yolo_detector, 'set_classes'):
                 self.yolo_detector.set_classes(self.DEFAULT_CLASSES)
@@ -378,7 +378,7 @@ class VideoCamera(object):
         
         # Initialize YOLO detector if switching to YOLO mode
         if mode == 'yolo' and self.yolo_detector is None:
-            self.yolo_detector = YOLODetector(confidence_threshold=0.35)
+            self.yolo_detector = YOLODetector(confidence_threshold=0.3)
             # Apply default classes
             if hasattr(self.yolo_detector, 'set_classes'):
                 self.yolo_detector.set_classes(self.DEFAULT_CLASSES)
@@ -430,7 +430,7 @@ class VideoCamera(object):
         Filters to target_object if set, and calculates center alignment errors.
         """
         if self.yolo_detector is None:
-            self.yolo_detector = YOLODetector(confidence_threshold=0.35)
+            self.yolo_detector = YOLODetector(confidence_threshold=0.3)
         
         # Get frame dimensions
         height, width, _ = frame.shape

@@ -14,6 +14,7 @@ import json
 import threading
 import cv2
 import numpy as np
+from keyboard_controller import KeyboardController
 
 # Load .env from the backend directory explicitly
 import os
@@ -41,6 +42,10 @@ def on_grab_complete_callback():
     pick_place_ctrl.start(target_base_angle=0)
 
 servoing_agent = VisualServoingAgent(robot, global_camera, on_grab_complete=on_grab_complete_callback)
+
+# Initialize and start Manual Keyboard Controller
+keyboard_ctrl = KeyboardController(robot)
+keyboard_ctrl.start()
 
 # ... (Routes) ...
 
@@ -411,71 +416,128 @@ def handle_command():
         if not user_text:
             return jsonify({"error": "No command provided"}), 400
 
-        # 1. Prepare Vision State (before setting target)
+        # 1. Prepare Vision State
         vision_state = {}
         if global_camera.last_detection:
             for obj in global_camera.last_detection:
-                # Handle YOLO detection format (object_name)
                 if 'object_name' in obj:
-                    object_name = obj['object_name'].lower().replace(' ', '_')
-                    key = object_name
-                # Handle color detection format (color) - for backward compatibility
-                elif 'color' in obj:
-                    color = obj['color'].lower()
-                    key = f"{color}_cube"
-                else:
-                    continue
-                
-                # Prefer CM coordinates if available, else pixel
-                if 'cm_x' in obj:
-                    vision_state[key] = [obj['cm_x'], obj['cm_y'], 0] # Assume z=0 for table
-                else:
-                    vision_state[key] = [obj['x'], obj['y'], 0] # Fallback to pixels (will need calibration)
+                    key = obj['object_name'].lower().replace(' ', '_')
+                    vision_state[key] = [obj.get('cm_x', 0), obj.get('cm_y', 0), 0]
 
-        # 2. Call LLM to get plan and target object
-        print(f"[DEBUG] Vision state being sent to LLM: {vision_state}")
-        print(f"[DEBUG] Detection count: {len(global_camera.last_detection)}")
+        # 2. Call LLM
+        print(f"[DEBUG] Processing command: '{user_text}'")
         llm_response = process_command(user_text, vision_state)
-        plan = llm_response.get("plan", [])
-        reply = llm_response.get("reply", "")
         
-        # 3. Extract and set target object for center-seeking
+        intent = llm_response.get("intent")
         target_object = llm_response.get("target_object")
+        params = llm_response.get("params", {})
+        reply = llm_response.get("reply", "Command processed.")
         
-        if target_object:
-            print(f"[DEBUG] Target object extracted from command: {target_object}")
-            
-            # TRIGGER VISUAL SERVOING
-            # Use the global instance 'servoing_agent' initialized at start
-            if servoing_agent:
-                # Stop any existing servoing
-                servoing_agent.stop()
-                # Start new servoing
-                servoing_agent.start(target_object)
-                
-                return jsonify({
-                    "status": "success", 
-                    "reply": f"🚀 Starting visual servoing for '{target_object}'!\n\n"
-                             f"I'm now tracking the {target_object} using the X/Y axis controller.\n"
-                             f"Say 'stop' to cancel.",
-                    "plan": [],
-                    "execution_log": []
-                })
+        print(f"[DEBUG] LLM Intent: {intent} | Target: {target_object} | Params: {params}")
+
+        # 3. Execute Intent
+        if intent == "PICK_ONLY":
+            if target_object:
+                if servoing_agent:
+                    servoing_agent.stop()
+                    servoing_agent.start(target_object, auto_place=False) # PICK ONLY
+                    return jsonify({"status": "success", "reply": reply})
+                else:
+                    return jsonify({"status": "error", "reply": "Servoing agent not initialized."})
             else:
-                 return jsonify({
-                    "status": "error",
-                    "reply": "⚠️ Visual Servoing Agent is not initialized.",
-                    "plan": [],
-                    "execution_log": []
-                })
+                return jsonify({"status": "error", "reply": "I couldn't identify which object to pick."})
+
+        elif intent == "PICK_AND_PLACE":
+            if target_object:
+                if servoing_agent:
+                    servoing_agent.stop()
+                    servoing_agent.start(target_object, auto_place=True) # FULL AUTO
+                    return jsonify({"status": "success", "reply": reply})
+                else:
+                    return jsonify({"status": "error", "reply": "Servoing agent not initialized."})
+            else:
+                 return jsonify({"status": "error", "reply": "I couldn't identify which object to pick."})
+
+        elif intent == "PLACE_ONLY":
+            modifier = params.get("modifier", "normal")
+            
+            # Place at CURRENT base angle (in-situ) unless user says "Move then place" (which isn't supported yet explicitly)
+            current_base_angle = int(robot.current_angles[0])
+            
+            success = pick_place_ctrl.start(target_base_angle=current_base_angle, modifier=modifier)
+            if success:
+                return jsonify({"status": "success", "reply": f"Placing object here ({modifier})."})
+            else:
+                return jsonify({"status": "error", "reply": "Could not start placement (maybe already running?)."})
+
+        elif intent == "MOVE_BASE":
+            angle = params.get("angle")
+            direction = params.get("direction")
+            
+            if angle is not None:
+                current_base = robot.current_angles[0]
+                new_base = current_base
+                
+                if direction == "right":
+                    new_base -= angle
+                elif direction == "left":
+                    new_base += angle
+                
+                # Clamp
+                new_base = max(0, min(180, new_base))
+                
+                # Move
+                angles = list(robot.current_angles)
+                angles[0] = int(new_base)
+                robot.move_to(angles)
+                
+                return jsonify({"status": "success", "reply": f"Rotated base to {new_base} degrees."})
+            else:
+                return jsonify({"status": "error", "reply": "No angle specified for movement."})
         
-        # If no target object found or parsed
-        return jsonify({
-            "status": "success",
-            "reply": reply if reply else "I understood the command, but couldn't identify a specific target object to track. Please say 'track the bottle'.",
-            "plan": [],
-            "execution_log": []
-        })
+        elif intent == "EXTEND" or intent == "RETRACT":
+            angle = params.get("angle", 10) # Default step
+            
+            # EXTEND: Shoulder DOWN (-), Elbow UP (+) (to keep gripper somewhat level)
+            # RETRACT: Shoulder UP (+), Elbow DOWN (-)
+            
+            # Heuristic Ratio: 1 : 0.8
+            # If we extend shoulder by 10 deg, elbow compensates ~8 deg.
+            
+            delta_s = angle
+            delta_e = angle * 0.8 
+            
+            if intent == "EXTEND":
+                delta_s = -delta_s  # Shoulder down
+                delta_e = delta_e   # Elbow up
+            else: # RETRACT
+                delta_s = delta_s   # Shoulder up
+                delta_e = -delta_e  # Elbow down
+                
+            current_s = robot.current_angles[1]
+            current_e = robot.current_angles[2]
+            
+            new_s = max(0, min(180, current_s + delta_s))
+            new_e = max(0, min(180, current_e + delta_e))
+            
+            angles = list(robot.current_angles)
+            angles[1] = int(new_s)
+            angles[2] = int(new_e)
+            
+            success = robot.move_to(angles)
+            
+            action = "Extended" if intent == "EXTEND" else "Retracted"
+            return jsonify({
+                "status": "success", 
+                "reply": f"{action} arm (S:{int(new_s)}, E:{int(new_e)})."
+            })
+
+        else:
+            # Fallback / Unclear
+            return jsonify({
+                "status": "success", 
+                "reply": reply or "I'm not sure what you want me to do."
+            })
 
     except Exception as e:
         traceback.print_exc()

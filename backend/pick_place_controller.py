@@ -55,24 +55,26 @@ class PickPlaceController:
         
         print("✅ PickPlaceController initialized")
     
-    def start(self, target_base_angle=0):
+    def start(self, target_base_angle=0, modifier="normal"):
         """
         Start the pick-and-place sequence.
         
         Args:
             target_base_angle: Base rotation angle for placement (default: 0°)
+            modifier: Placement distance modifier ("normal", "near", "far")
         """
         if self.running:
             print("⚠️ Pick-and-place already running!")
             return False
         
         self.target_base_angle = target_base_angle
+        self.modifier = modifier
         self.running = True
         self.state = "STARTING"
         
         print(f"\n{'='*60}")
         print(f"🚀 PICK-AND-PLACE STARTED")
-        print(f"   Target Base Angle: {target_base_angle}°")
+        print(f"   Target Base Angle: {target_base_angle}° | Modifier: {modifier}")
         print(f"{'='*60}\n")
         
         # Start execution thread
@@ -80,6 +82,8 @@ class PickPlaceController:
         self.thread.start()
         
         return True
+
+
     
     def stop(self):
         """Emergency stop the operation."""
@@ -234,11 +238,21 @@ class PickPlaceController:
             # ============================================================
             self.state = "LOWERING"
             self.current_telemetry["state"] = "LOWERING"
-            self.current_telemetry["message"] = "Lowering to placement height"
+            self.current_telemetry["message"] = f"Lowering to placement height ({self.modifier})"
             
             print(f"\n{'='*60}")
-            print("📥 PHASE 3: LOWERING OBJECT")
+            print(f"📥 PHASE 3: LOWERING OBJECT ({self.modifier.upper()})")
             print(f"{'='*60}")
+            
+            # Determine placement shoulder angle based on modifier
+            # Standard: 90
+            # Far (Reach out): 75
+            # Near (Close in): 105
+            place_shoulder = 90
+            if self.modifier == "far":
+                place_shoulder = 75
+            elif self.modifier == "near":
+                place_shoulder = 105
             
             current_angles = list(self.robot.current_angles)
             # FORCE-LOCK wrist angles
@@ -246,7 +260,7 @@ class PickPlaceController:
             current_angles[4] = 12
             
             lower_angles = list(current_angles)
-            lower_angles[1] = 90  # Shoulder to final placement position (extended/down)
+            lower_angles[1] = place_shoulder  # Adjusted shoulder for distance
             lower_angles[2] = self.PLACE_ELBOW  # Elbow more open
             lower_angles[3] = 90  # LOCK wrist pitch to prevent twitch
             lower_angles[4] = 12  # LOCK wrist roll

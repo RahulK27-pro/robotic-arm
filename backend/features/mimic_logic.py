@@ -61,29 +61,29 @@ class MimicController:
         
         # --- ANFIS BRAIN INIT ---
         print("[MIMIC] Loading ANFIS Brain...")
-        ranges = [(-600, 600), (0, 120)]
-        self.model = ANFIS(n_inputs=2, n_rules=8, input_ranges=ranges)
+        ranges = [(-400, 400)] # Matching visual_servoing.py for anfis_x
+        self.model = ANFIS(n_inputs=1, n_rules=5, input_ranges=ranges)
         self.use_anfis = False
         
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        model_path = os.path.join(base_dir, '../brain/anfis_model.pth')
+        model_path = os.path.join(base_dir, '../brain/models/anfis_x.pth')
         
         try:
             if os.path.exists(model_path):
                 self.model.load_state_dict(torch.load(model_path))
                 self.model.eval()
                 self.use_anfis = True
-                print(f"[MIMIC] ANFIS Brain Loaded! 🧠")
+                print(f"[MIMIC] ANFIS Brain (X-Axis) Loaded! 🧠")
             else:
-                print(f"[MIMIC] ⚠️ ANFIS model not found. Using Legacy P-Control.")
+                print(f"[MIMIC] ⚠️ ANFIS model not found at {model_path}. Using Legacy P-Control.")
         except Exception as e:
             print(f"[MIMIC] Error loading brain: {e}")
 
-    def predict_correction(self, error, distance):
-        """Neural inference for correction angle"""
+    def predict_correction(self, error):
+        """Neural inference for correction angle (X-axis)"""
         if not self.use_anfis: return 0.0
         with torch.no_grad():
-            inputs = torch.tensor([[error, distance]], dtype=torch.float32)
+            inputs = torch.tensor([[error]], dtype=torch.float32)
             return self.model(inputs).item()
         
     def get_hand_landmarks(self):
@@ -236,7 +236,7 @@ class MimicController:
                     # HYBRID CONTROL: Use ANFIS if available, else P-Control
                     if self.use_anfis:
                          # Neural Network Control
-                         base_correction = self.predict_correction(s_error_x, s_reach)
+                         base_correction = self.predict_correction(s_error_x)
                          # Note: ANFIS output is already clamped/scaled by training data (-1 to 1 mostly)
                          # But let's respect the MAX_STEP speed limit
                          base_correction = max(-MAX_STEP, min(MAX_STEP, base_correction))
