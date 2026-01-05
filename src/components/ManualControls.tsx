@@ -21,7 +21,7 @@ interface Position {
   speed: number;
 }
 
-const API_BASE = "http://localhost:5000";
+const API_BASE = "/api";
 
 // Throttle hook - limits function calls to once per delay period
 const useThrottle = (callback: (...args: any[]) => void, delay: number) => {

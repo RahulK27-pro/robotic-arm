@@ -17,7 +17,7 @@ const MimicPage = () => {
 
     const toggleMimic = async () => {
         setLoading(true);
-        const endpoint = active ? 'http://localhost:5000/mimic_stop' : 'http://localhost:5000/mimic_start';
+        const endpoint = active ? '/api/mimic_stop' : '/api/mimic_start';
 
         try {
             const res = await fetch(endpoint, { method: 'POST' });
@@ -40,7 +40,7 @@ const MimicPage = () => {
 
         const interval = setInterval(async () => {
             try {
-                const res = await fetch('http://localhost:5000/mimic_telemetry');
+                const res = await fetch('/api/mimic_telemetry');
                 const data = await res.json();
                 setTelemetry(data);
             } catch (err) {
@@ -78,7 +78,7 @@ const MimicPage = () => {
                             <CardContent>
                                 <div className="relative aspect-video bg-black rounded-lg overflow-hidden border border-border/50">
                                     <img
-                                        src="http://localhost:5000/mimic_video_feed"
+                                        src="/api/mimic_video_feed"
                                         alt="Camera Feed"
                                         className="w-full h-full object-contain"
                                     />
@@ -176,8 +176,8 @@ const MimicPage = () => {
                                         disabled={loading}
                                         size="lg"
                                         className={`relative w-full text-lg font-bold transition-all duration-300 transform hover:scale-105 active:scale-95 ${active
-                                                ? 'bg-red-500 hover:bg-red-600 text-white'
-                                                : 'bg-gradient-to-r from-blue-600 to-violet-600 hover:from-blue-700 hover:to-violet-700 text-white'
+                                            ? 'bg-red-500 hover:bg-red-600 text-white'
+                                            : 'bg-gradient-to-r from-blue-600 to-violet-600 hover:from-blue-700 hover:to-violet-700 text-white'
                                             }`}
                                     >
                                         {loading ? (

@@ -24,7 +24,7 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     useEffect(() => {
         const fetchStatus = async () => {
             try {
-                const response = await fetch("http://localhost:5000/status");
+                const response = await fetch("/api/status");
                 if (response.ok) {
                     const data = await response.json();
                     setStatus({

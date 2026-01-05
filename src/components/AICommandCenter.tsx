@@ -68,7 +68,7 @@ const AICommandCenter = ({ onServoUpdate }: AICommandCenterProps) => {
 
     try {
       // First, get the current vision state
-      const visionResponse = await fetch("http://localhost:5000/get_detection_result");
+      const visionResponse = await fetch("/api/get_detection_result");
       const visionData = await visionResponse.json();
 
       // Format vision state - handle both YOLO and color detection formats
@@ -94,7 +94,7 @@ const AICommandCenter = ({ onServoUpdate }: AICommandCenterProps) => {
       }
 
       // Send command to AI
-      const response = await fetch("http://localhost:5000/process_command", {
+      const response = await fetch("/api/process_command", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ command: userText }),

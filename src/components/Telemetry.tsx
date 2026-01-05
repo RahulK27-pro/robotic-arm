@@ -16,7 +16,7 @@ interface ServoingTelemetry {
     distance: number;
 }
 
-const API_BASE = "http://localhost:5000";
+const API_BASE = "/api";
 
 const Telemetry = () => {
     const [coordinates, setCoordinates] = useState<CoordinateData>({ x: 0, y: 0, z: 0 });

@@ -8,7 +8,7 @@ const CameraView = () => {
         {/* Camera Feed Placeholder */}
         {/* Live Camera Feed */}
         <img
-          src="http://localhost:5000/video_feed"
+          src="/api/video_feed"
           alt="Live Camera Feed"
           className="absolute inset-0 w-full h-full object-cover"
         />
