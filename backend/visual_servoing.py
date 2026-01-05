@@ -265,12 +265,12 @@ class VisualServoingAgent:
                     # Use ANFIS for large adjustments
                     pred_corr = self.predict_x(error_x)
                     if pred_corr is not None:
-                        step = pred_corr * 0.6 
+                        step = pred_corr * 0.4 
                         step = max(-15, min(15, step)) 
                     else:
                         step = 2.0 if error_x > 0 else -2.0
                     
-                    delay_time = 0.03 # Normal fast smooth loop for large moves
+                    delay_time = 0.05 
                 
                 # Calculate Target
                 target_base = current_base + step
@@ -279,28 +279,30 @@ class VisualServoingAgent:
                 self.current_telemetry["correction_x"] = step
                 print(f"[Align Loop] ErrX: {error_x:.0f} -> ANFIS: {step:.2f}° -> Base: {current_base:.1f} -> {target_base:.1f}", flush=True)
                 
-                # SMOOTH LINEAR MOVEMENT (1 degree steps)
+                # SMOOTH S-CURVE MOVEMENT
                 # To prevent sudden jumps and overshoot
                 start_b = current_base
                 end_b = target_base
                 
                 # Determine number of steps (degrees)
                 dist = abs(end_b - start_b)
-                steps = int(max(1, dist)) # Ensure at least 1 step if dist > 0
+                # Ensure at least 5 steps for smoothness if moving, but not too slow for small moves
+                steps = int(max(5, dist * 2)) 
                 
-                # Increment per step (can be fractional if we want, but user asked for "each degree")
-                # We will just interpolate linearly
                 for i in range(1, steps + 1):
                     if not self.running: break
                     
-                    # Lerp
-                    progress = i / steps
-                    interp_base = start_b + (end_b - start_b) * progress
+                    t = i / steps
+                    # Use S-Curve for easing
+                    t_smooth = self.s_curve(t)
+                    
+                    # Interpolate
+                    interp_base = start_b + (end_b - start_b) * t_smooth
                     
                     self.robot.move_to([interp_base, current_shoulder, current_elbow, WRIST_PITCH, WRIST_ROLL, GRIPPER])
                     
-                    # Dynamic delay: 1.0s for fine tune, 0.03s for large moves
-                    time.sleep(delay_time)
+                    # Dynamic delay
+                    time.sleep(0.01)
                 
                 # Ensure final position is set accurately
                 current_base = target_base

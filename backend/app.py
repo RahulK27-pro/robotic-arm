@@ -15,6 +15,7 @@ import threading
 import cv2
 import numpy as np
 from keyboard_controller import KeyboardController
+from behaviors.greeting import GreetingController
 
 # Load .env from the backend directory explicitly
 import os
@@ -119,6 +120,7 @@ def get_pick_place_status():
 # --- MIMIC MODE INTEGRATION ---
 mimic_thread = None
 mimic_ctrl = MimicController(robot, global_camera)
+greeting_ctrl = GreetingController(robot, global_camera)
 
 @app.route('/mimic_start', methods=['POST'])
 def start_mimic():
@@ -193,6 +195,21 @@ def mimic_video_feed():
     """Video feed endpoint for Mimic Mode page"""
     return Response(gen_mimic(global_camera),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
+
+# --- GREETING MODE INTEGRATION ---
+@app.route('/greeting/start', methods=['POST'])
+def start_greeting():
+    greeting_ctrl.start_background_monitoring()
+    return jsonify({"status": "started", "message": "Greeting Mode Active"})
+
+@app.route('/greeting/stop', methods=['POST'])
+def stop_greeting():
+    greeting_ctrl.stop()
+    return jsonify({"status": "stopped", "message": "Greeting Mode Stopped"})
+    
+@app.route('/greeting/status', methods=['GET'])
+def get_greeting_status():
+    return jsonify(greeting_ctrl.get_status())
 
 
 
