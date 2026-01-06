@@ -400,7 +400,7 @@ class VisualServoingAgent:
         self.log(f"   Elbow: {current_elbow:.1f}° → {elbow_target:.1f}°")
         
         # Open gripper
-        GRIPPER_OPEN = 170
+        GRIPPER_OPEN = 175
         self.robot.move_to([int(current_base), int(current_shoulder), int(current_elbow), pitch, roll, GRIPPER_OPEN])
         time.sleep(0.5)
         
@@ -435,7 +435,7 @@ class VisualServoingAgent:
         self.log("\n🤏 Closing gripper...")
         self.current_telemetry["mode"] = "GRASPING"
         
-        GRIPPER_CLOSED = 120
+        GRIPPER_CLOSED = 150
         self.robot.move_to([
             int(base_target),
             int(shoulder_target),
@@ -487,7 +487,7 @@ class VisualServoingAgent:
         DISTANCE_THRESHOLD = 5.0  # cm
         SHOULDER_LIMIT = 0  # degrees
         Y_ERROR_THRESHOLD = 20  # pixels
-        GRIPPER_OPEN = 170
+        GRIPPER_OPEN = 175
         
         # Open gripper at start
         self.robot.move_to([base, shoulder, elbow, pitch, roll, GRIPPER_OPEN])

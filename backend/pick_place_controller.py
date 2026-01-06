@@ -49,8 +49,8 @@ class PickPlaceController:
         self.LIFT_ELBOW = 120     # Maintain stable elbow position during transport
         self.PLACE_SHOULDER = 100  # Forward/down position
         self.PLACE_ELBOW = 140     # More open (lowers wrist)
-        self.GRIPPER_CLOSED = 120
-        self.GRIPPER_OPEN = 170  # Full open for complete release
+        self.GRIPPER_CLOSED = 150
+        self.GRIPPER_OPEN = 175  # Full open for complete release
         self.HOME_POSITION = [23, 100, 140, 90, 12, 155]
         
         print("✅ PickPlaceController initialized")
