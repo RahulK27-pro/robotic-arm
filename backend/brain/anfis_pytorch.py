@@ -39,7 +39,9 @@ class GaussianMembership(nn.Module):
         x = x.unsqueeze(2).expand(-1, -1, self.n_rules)
         
         # Gaussian formula: exp( -0.5 * ((x - mu) / sigma)^2 )
-        exponent = -0.5 * ((x - self.mu) / self.sigma) ** 2
+        # Clamp sigma to avoid division by zero
+        sigma_safe = torch.clamp(self.sigma, min=1e-5)
+        exponent = -0.5 * ((x - self.mu) / sigma_safe) ** 2
         return torch.exp(exponent)
 
 class ANFIS(nn.Module):

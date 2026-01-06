@@ -56,6 +56,11 @@ class VisualServoingAgent:
         # Alignment settings
         self.centered_frames = 0 
         self.required_centered_frames = 3
+        
+        # Stability filter
+        self.error_history_x = []
+        self.filter_window_size = 5
+
 
         # --- LOADER HELPER ---
         def load_anfis(name, inputs, rules, ranges):
@@ -255,29 +260,34 @@ class VisualServoingAgent:
                 if not self.running: break
                 
                 # FORCE SLOW MOVEMENT FOR FINE TUNING
-                if abs(error_x) < 100:
-                    # User requested: "1 degree per second when less than 100px offset"
-                    # Threshold lowered to 100px to keep ANFIS active longer
-                    step = 1.0 if error_x > 0 else -1.0
-                    delay_time = 1.0 # 1 second delay -> 1 deg/sec effectively
-                    print(f"  [Fine Tune] Error {error_x:.0f} < 100px. Forcing 1 deg step.", flush=True)
-                else: 
-                    # Use ANFIS for large adjustments
-                    pred_corr = self.predict_x(error_x)
-                    if pred_corr is not None:
-                        step = pred_corr * 0.4 
-                        step = max(-15, min(15, step)) 
-                    else:
-                        step = 2.0 if error_x > 0 else -2.0
-                    
-                    delay_time = 0.05 
+                # [REMOVED] Hardcoded < 100px logic removed to allow ANFIS full control.
+                
+                # --- APPLY STABILITY FILTER ---
+                self.error_history_x.append(error_x)
+                if len(self.error_history_x) > self.filter_window_size:
+                    self.error_history_x.pop(0)
+                
+                smoothed_error_x = sum(self.error_history_x) / len(self.error_history_x)
+                
+                # Use ANFIS for ALL adjustments
+                # Gain reduced to 0.4 for slower, safer correction (User request: "slow speed")
+                pred_corr = self.predict_x(smoothed_error_x)
+                
+                if pred_corr is not None:
+                    step = pred_corr * 0.4  
+                    step = max(-10, min(10, step)) # Reduced max step limit for safety
+                else:
+                    # Fallback if model fails
+                    step = 1.0 if smoothed_error_x > 0 else -1.0
+                
+                delay_time = 0.2 # Increased delay for stabilization
                 
                 # Calculate Target
                 target_base = current_base + step
                 target_base = max(0, min(180, target_base))
                 
                 self.current_telemetry["correction_x"] = step
-                print(f"[Align Loop] ErrX: {error_x:.0f} -> ANFIS: {step:.2f}° -> Base: {current_base:.1f} -> {target_base:.1f}", flush=True)
+                print(f"[Align Loop] ErrX: {error_x:.0f} (Smooth: {smoothed_error_x:.1f}) -> ANFIS: {step:.2f}° -> Base: {current_base:.1f} -> {target_base:.1f}", flush=True)
                 
                 # SMOOTH S-CURVE MOVEMENT
                 # To prevent sudden jumps and overshoot
@@ -286,8 +296,14 @@ class VisualServoingAgent:
                 
                 # Determine number of steps (degrees)
                 dist = abs(end_b - start_b)
-                # Ensure at least 5 steps for smoothness if moving, but not too slow for small moves
-                steps = int(max(5, dist * 2)) 
+                # Slower motion: 4 steps per degree difference (was 2)
+                # Minimum 10 steps to ensure it doesn't snap instantly
+                steps = int(max(10, dist * 4)) 
+                
+                # --- STOP-AND-GO: FREEZE VISION ---
+                # Pause YOLO to prevent "simultaneous" coordinate updates during motion.
+                print("  [Motion] Moving... (Vision Paused)", flush=True)
+                self.camera.pause_yolo = True
                 
                 for i in range(1, steps + 1):
                     if not self.running: break
@@ -307,10 +323,15 @@ class VisualServoingAgent:
                 # Ensure final position is set accurately
                 current_base = target_base
                 
-                # Wait for stabilization (reduced slightly since movement time covers some settling)
+                # --- STOP-AND-GO: UNFREEZE VISION ---
+                self.camera.pause_yolo = False
+                print("  [Motion] Stopped. Vision Unpaused.", flush=True)
+                
+                # Wait for stabilization (CRITICAL: Camera needs to capture NEW frames now)
+                # 0.5s is usually enough for the camera buffer to clear and get a fresh stable frame
                 time.sleep(0.5)
                 
-                # Update Error
+                # Update Error (Get fresh detection after move)
                 detections = self.camera.last_detection
                 if not detections:
                     print("⚠️ Lost Object during alignment!")
