@@ -211,6 +211,24 @@ def stop_greeting():
 def get_greeting_status():
     return jsonify(greeting_ctrl.get_status())
 
+# --- LIVE MODE INTEGRATION ---
+from behaviors.live_mode import LiveModeController
+live_ctrl = LiveModeController(robot)
+
+@app.route('/live/start', methods=['POST'])
+def start_live_mode():
+    live_ctrl.start()
+    return jsonify({"status": "started", "message": "Live Mode Active"})
+
+@app.route('/live/stop', methods=['POST'])
+def stop_live_mode():
+    live_ctrl.stop()
+    return jsonify({"status": "stopped", "message": "Live Mode Stopped"})
+
+@app.route('/live/status', methods=['GET'])
+def get_live_status():
+    return jsonify({"active": live_ctrl.running})
+
 
 
 

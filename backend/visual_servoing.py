@@ -456,7 +456,7 @@ class VisualServoingAgent:
         self.log("\n🤏 Closing gripper...")
         self.current_telemetry["mode"] = "GRASPING"
         
-        GRIPPER_CLOSED = 150
+        GRIPPER_CLOSED = 130
         self.robot.move_to([
             int(base_target),
             int(shoulder_target),
